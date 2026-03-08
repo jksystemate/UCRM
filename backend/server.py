@@ -11,7 +11,6 @@ from http.server import HTTPServer, SimpleHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from urllib.parse import urlparse, parse_qs
 from datetime import date, datetime
-import cgi
 import io
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "relations_crm.db")

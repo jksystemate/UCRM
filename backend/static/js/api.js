@@ -72,10 +72,15 @@ export const api = {
     getUsers: () => request('/users'),
     createUser: (data) => request('/users', { method: 'POST', body: JSON.stringify(data) }),
     deleteUser: (id) => request(`/users/${id}`, { method: 'DELETE' }),
+    restoreUser: (id) => request(`/users/${id}/restore`, { method: 'POST' }),
 
     // Combined endpoints (fewer requests = faster)
     getCompanyFull: (id) => request(`/companies/${id}/full`),
-    getDashboardAll: () => request('/dashboard/all'),
+    getDashboardAll: (params = {}) => {
+        const qs = new URLSearchParams(params).toString();
+        return request(`/dashboard/all${qs ? '?' + qs : ''}`);
+    },
+    getScoreHistoryAggregate: () => request('/score-history/aggregate'),
 
     // Dashboard
     getScores: (params = {}) => {
@@ -98,6 +103,33 @@ export const api = {
     updateTask: (id, data) => request(`/tasks/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
     deleteTask: (id) => request(`/tasks/${id}`, { method: 'DELETE' }),
     getTaskSummary: () => request('/tasks/summary'),
+    getTaskNotes: (id) => request(`/tasks/${id}/notes`),
+    createTaskNote: (id, data) => request(`/tasks/${id}/notes`, { method: 'POST', body: JSON.stringify(data) }),
+    updateTaskNote: (id, data) => request(`/task-notes/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+    getTaskHistory: (id) => request(`/tasks/${id}/history`),
+    uploadTaskEmail: async (taskId, file) => {
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('task_id', taskId);
+        const headers = {};
+        const uid = getCurrentUserId();
+        if (uid) headers['X-User-Id'] = uid;
+        const res = await fetch(`${BASE}/tasks/upload-email`, { method: 'POST', body: formData, headers });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({ detail: 'Upload fejlede' }));
+            throw new Error(err.detail);
+        }
+        return res.json();
+    },
+
+    // Tags
+    updateTag: (id, data) => request(`/tags/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+
+    // Tender notes
+    getTenderNotes: (id) => request(`/tenders/${id}/notes`),
+    createTenderNote: (id, data) => request(`/tenders/${id}/notes`, { method: 'POST', body: JSON.stringify(data) }),
+    updateTenderNote: (id, data) => request(`/tender-notes/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+    getTenderHistory: (id) => request(`/tenders/${id}/history`),
 
     // Audit log
     getAuditLog: (params = {}) => {

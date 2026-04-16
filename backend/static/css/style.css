@@ -506,3 +506,95 @@ th.cursor-pointer:hover { color: #374151; }
     color: #9ca3af;
     margin-left: auto;
 }
+
+/* ─── Customer Matrix ─── */
+.customer-matrix {
+    display: grid;
+    grid-template-columns: 120px repeat(3, 1fr);
+    grid-auto-rows: auto;
+    gap: 0;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    overflow: hidden;
+    margin-left: 20px;
+}
+.matrix-corner {
+    background: #f9fafb;
+    padding: 12px;
+    border-bottom: 1px solid #e5e7eb;
+    border-right: 1px solid #e5e7eb;
+}
+.matrix-col-header {
+    background: #f9fafb;
+    padding: 10px 12px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: #374151;
+    text-align: center;
+    border-bottom: 1px solid #e5e7eb;
+    border-right: 1px solid #e5e7eb;
+}
+.matrix-col-header:last-of-type { border-right: none; }
+.matrix-row-header {
+    background: #f9fafb;
+    padding: 12px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: #374151;
+    display: flex;
+    align-items: flex-start;
+    border-bottom: 1px solid #e5e7eb;
+    border-right: 1px solid #e5e7eb;
+}
+.matrix-cell {
+    padding: 0;
+    border-bottom: 1px solid #e5e7eb;
+    border-right: 1px solid #e5e7eb;
+    overflow: hidden;
+}
+.matrix-cell-scroll {
+    padding: 8px;
+    max-height: 180px;
+    overflow-y: auto;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    align-content: flex-start;
+}
+.matrix-cell:nth-child(4n) { border-right: none; }
+.customer-matrix > :nth-last-child(-n+4) { border-bottom: none; }
+.matrix-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 10px;
+    border-radius: 999px;
+    border: 1.5px solid;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-decoration: none;
+    transition: transform 0.15s, box-shadow 0.15s;
+    cursor: pointer;
+}
+.matrix-chip:hover {
+    transform: scale(1.08);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+    z-index: 1;
+}
+.matrix-chip-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+.matrix-chip-name { white-space: nowrap; }
+.matrix-y-label {
+    position: absolute;
+    left: -6px;
+    top: 50%;
+    transform: rotate(-90deg) translateX(-50%);
+    font-size: 0.7rem;
+    color: #9ca3af;
+    white-space: nowrap;
+    transform-origin: left center;
+}

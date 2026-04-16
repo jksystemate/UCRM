@@ -30,7 +30,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS companies (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
-            sector TEXT CHECK(sector IN ('el', 'vand', 'varme', 'multiforsyning')),
+            sector TEXT,
             address TEXT, city TEXT, zip_code TEXT, website TEXT, notes TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
@@ -52,7 +52,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             contact_id INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
             user_id INTEGER REFERENCES users(id),
-            type TEXT NOT NULL CHECK(type IN ('email', 'phone', 'meeting', 'linkedin')),
+            type TEXT NOT NULL,
             date DATE NOT NULL, subject TEXT, notes TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
@@ -194,7 +194,7 @@ def init_db():
             template_id INTEGER REFERENCES tender_templates(id) ON DELETE SET NULL,
             title TEXT NOT NULL,
             description TEXT,
-            status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','in_progress','submitted','won','lost')),
+            status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','in_progress','submitted','won','lost','dropped')),
             deadline DATE,
             contact_id INTEGER REFERENCES contacts(id) ON DELETE SET NULL,
             responsible_id INTEGER REFERENCES users(id),
@@ -238,6 +238,30 @@ def init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_section_audit ON tender_section_audit(section_id);
 
+        -- Task notes (comments/notes on tasks)
+        CREATE TABLE IF NOT EXISTS task_notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            user_id INTEGER REFERENCES users(id),
+            user_name TEXT,
+            content TEXT NOT NULL,
+            note_type TEXT NOT NULL DEFAULT 'note' CHECK(note_type IN ('note','email','status_change','field_change')),
+            metadata TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_task_notes_task ON task_notes(task_id);
+
+        -- Tender notes (comments/notes on tenders)
+        CREATE TABLE IF NOT EXISTS tender_notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tender_id INTEGER NOT NULL REFERENCES tenders(id) ON DELETE CASCADE,
+            user_id INTEGER REFERENCES users(id),
+            user_name TEXT,
+            content TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_tender_notes_tender ON tender_notes(tender_id);
+
         -- Score decay rules (configurable inactivity penalties)
         CREATE TABLE IF NOT EXISTS score_decay_rules (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -274,6 +298,29 @@ def init_db():
         "ALTER TABLE contacts ADD COLUMN linkedin_last_checked DATE",
         "ALTER TABLE tender_sections ADD COLUMN start_date DATE",
         "ALTER TABLE tender_sections ADD COLUMN end_date DATE",
+        # Kundematrix: vigtighed og salgsstadie
+        "ALTER TABLE companies ADD COLUMN importance TEXT DEFAULT 'middel_vigtig'",
+        "ALTER TABLE companies ADD COLUMN sales_stage TEXT DEFAULT 'tidlig_fase'",
+        # Relationsscore-parametre (0-10 skala) — legacy, kept for migration
+        "ALTER TABLE companies ADD COLUMN score_cxo INTEGER DEFAULT 0",
+        "ALTER TABLE companies ADD COLUMN score_kontaktfrekvens INTEGER DEFAULT 0",
+        "ALTER TABLE companies ADD COLUMN score_kontaktbredde INTEGER DEFAULT 0",
+        "ALTER TABLE companies ADD COLUMN score_kendskab INTEGER DEFAULT 0",
+        "ALTER TABLE companies ADD COLUMN score_historik INTEGER DEFAULT 0",
+        # Nye manuelle relationsscore-parametre (0-10)
+        "ALTER TABLE companies ADD COLUMN score_kendskab_behov INTEGER DEFAULT 0",
+        "ALTER TABLE companies ADD COLUMN score_workshops INTEGER DEFAULT 0",
+        "ALTER TABLE companies ADD COLUMN score_marketing INTEGER DEFAULT 0",
+        # Udvidet virksomhedsdata
+        "ALTER TABLE companies ADD COLUMN tier TEXT",
+        "ALTER TABLE companies ADD COLUMN ejerform TEXT",
+        "ALTER TABLE companies ADD COLUMN has_el BOOLEAN DEFAULT 0",
+        "ALTER TABLE companies ADD COLUMN has_gas BOOLEAN DEFAULT 0",
+        "ALTER TABLE companies ADD COLUMN has_vand BOOLEAN DEFAULT 0",
+        "ALTER TABLE companies ADD COLUMN has_varme BOOLEAN DEFAULT 0",
+        "ALTER TABLE companies ADD COLUMN has_spildevand BOOLEAN DEFAULT 0",
+        "ALTER TABLE companies ADD COLUMN has_affald BOOLEAN DEFAULT 0",
+        "ALTER TABLE companies ADD COLUMN est_kunder TEXT",
     ]
     for m in migrations:
         try:
@@ -281,10 +328,41 @@ def init_db():
         except sqlite3.OperationalError:
             pass  # Column already exists
 
+    # Migration: remove sector CHECK constraint on companies (allow any sector value)
+    try:
+        conn.execute("SAVEPOINT sector_check")
+        conn.execute("INSERT INTO companies (name, sector) VALUES ('__migration_test__', 'e-mobilitet')")
+        conn.execute("ROLLBACK TO sector_check")
+        conn.execute("RELEASE sector_check")
+    except sqlite3.IntegrityError:
+        conn.executescript("""
+            CREATE TABLE companies_new AS SELECT * FROM companies;
+            DROP TABLE companies;
+            CREATE TABLE companies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, sector TEXT,
+                address TEXT, city TEXT, zip_code TEXT, website TEXT, notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                rating TEXT DEFAULT 'C', account_manager_id INTEGER REFERENCES users(id),
+                importance TEXT DEFAULT 'middel_vigtig', sales_stage TEXT DEFAULT 'tidlig_fase',
+                score_cxo INTEGER DEFAULT 0, score_kontaktfrekvens INTEGER DEFAULT 0,
+                score_kontaktbredde INTEGER DEFAULT 0, score_kendskab INTEGER DEFAULT 0, score_historik INTEGER DEFAULT 0,
+                tier TEXT, ejerform TEXT, has_el BOOLEAN DEFAULT 0, has_gas BOOLEAN DEFAULT 0,
+                has_vand BOOLEAN DEFAULT 0, has_varme BOOLEAN DEFAULT 0, has_spildevand BOOLEAN DEFAULT 0,
+                has_affald BOOLEAN DEFAULT 0, est_kunder TEXT
+            );
+            INSERT INTO companies SELECT *, NULL, NULL, 0, 0, 0, 0, 0, 0, NULL FROM companies_new
+                WHERE (SELECT COUNT(*) FROM pragma_table_info('companies_new') WHERE name='tier') = 0;
+            INSERT INTO companies SELECT * FROM companies_new
+                WHERE (SELECT COUNT(*) FROM pragma_table_info('companies_new') WHERE name='tier') > 0;
+            DROP TABLE companies_new;
+        """)
+
     # Migration: update tender_section_audit CHECK constraint to allow 'comment' type
     try:
+        conn.execute("SAVEPOINT audit_check")
         conn.execute("INSERT INTO tender_section_audit (section_id, note_type, content) VALUES (0, 'comment', '__migration_test__')")
-        conn.execute("DELETE FROM tender_section_audit WHERE content = '__migration_test__'")
+        conn.execute("ROLLBACK TO audit_check")
+        conn.execute("RELEASE audit_check")
     except sqlite3.IntegrityError:
         # Old CHECK constraint present - recreate table without CHECK
         conn.executescript("""
@@ -302,6 +380,97 @@ def init_db():
             ALTER TABLE tender_section_audit_new RENAME TO tender_section_audit;
             CREATE INDEX IF NOT EXISTS idx_section_audit ON tender_section_audit(section_id);
         """)
+
+    # Migration: remove interaction type CHECK constraint (allow new types like meeting_task, campaign)
+    # Skip if already migrated to v3 (company_id exists = new schema, no CHECK constraint)
+    has_company_id = conn.execute("SELECT COUNT(*) FROM pragma_table_info('interactions') WHERE name='company_id'").fetchone()[0]
+    if not has_company_id:
+        try:
+            conn.execute("SAVEPOINT interaction_check")
+            conn.execute("INSERT INTO interactions (contact_id, type, date) VALUES (0, 'campaign', '2000-01-01')")
+            conn.execute("ROLLBACK TO interaction_check")
+            conn.execute("RELEASE interaction_check")
+        except sqlite3.IntegrityError:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS interactions_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    contact_id INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+                    user_id INTEGER REFERENCES users(id),
+                    type TEXT NOT NULL,
+                    date DATE NOT NULL, subject TEXT, notes TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                INSERT OR IGNORE INTO interactions_new SELECT * FROM interactions;
+                DROP TABLE interactions;
+                ALTER TABLE interactions_new RENAME TO interactions;
+                CREATE INDEX IF NOT EXISTS idx_interactions_contact ON interactions(contact_id);
+                CREATE INDEX IF NOT EXISTS idx_interactions_date ON interactions(date);
+            """)
+
+    # Migration: make contact_id nullable + add company_id to interactions
+    try:
+        conn.execute("SELECT company_id FROM interactions LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.executescript("""
+            CREATE TABLE interactions_v3 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                contact_id INTEGER REFERENCES contacts(id) ON DELETE SET NULL,
+                company_id INTEGER REFERENCES companies(id) ON DELETE CASCADE,
+                user_id INTEGER REFERENCES users(id),
+                type TEXT NOT NULL,
+                date DATE NOT NULL, subject TEXT, notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO interactions_v3 (id, contact_id, company_id, user_id, type, date, subject, notes, created_at)
+            SELECT i.id, i.contact_id, c.company_id, i.user_id, i.type, i.date, i.subject, i.notes, i.created_at
+            FROM interactions i LEFT JOIN contacts c ON i.contact_id = c.id;
+            DROP TABLE interactions;
+            ALTER TABLE interactions_v3 RENAME TO interactions;
+            CREATE INDEX IF NOT EXISTS idx_interactions_contact ON interactions(contact_id);
+            CREATE INDEX IF NOT EXISTS idx_interactions_company ON interactions(company_id);
+            CREATE INDEX IF NOT EXISTS idx_interactions_date ON interactions(date);
+        """)
+        conn.commit()
+
+    # Migration: add 'dropped' to tender status CHECK constraint
+    try:
+        conn.execute("SAVEPOINT tender_status_check")
+        conn.execute("INSERT INTO tenders (company_id, title, status) VALUES (1, '__migration_test__', 'dropped')")
+        conn.execute("ROLLBACK TO tender_status_check")
+        conn.execute("RELEASE tender_status_check")
+    except sqlite3.IntegrityError:
+        conn.executescript("""
+            CREATE TABLE tenders_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+                template_id INTEGER REFERENCES tender_templates(id) ON DELETE SET NULL,
+                title TEXT NOT NULL,
+                description TEXT,
+                status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','in_progress','submitted','won','lost','dropped')),
+                deadline DATE,
+                contact_id INTEGER REFERENCES contacts(id) ON DELETE SET NULL,
+                responsible_id INTEGER REFERENCES users(id),
+                created_by INTEGER REFERENCES users(id),
+                estimated_value TEXT,
+                portal_link TEXT,
+                notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO tenders_new SELECT * FROM tenders;
+            DROP TABLE tenders;
+            ALTER TABLE tenders_new RENAME TO tenders;
+            CREATE INDEX IF NOT EXISTS idx_tenders_company ON tenders(company_id);
+            CREATE INDEX IF NOT EXISTS idx_tenders_status ON tenders(status);
+        """)
+
+    # Migration: add deleted_at to users for soft delete
+    try:
+        conn.execute("SELECT deleted_at FROM users LIMIT 1")
+    except:
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN deleted_at TIMESTAMP")
+        except:
+            pass
 
     conn.commit()
     conn.close()
@@ -345,10 +514,35 @@ def check_score_notifications(conn):
                     (s["company_id"], msg))
     conn.commit()
 
+# ─── Combined Relationsscore (0-100) ───
+# 7 sub-scores, each 0-10, with weights summing to 100%
+SCORE_WEIGHTS = {
+    "kontaktfrekvens": 0.20,       # auto: from interaction points
+    "kontaktdaekning": 0.15,       # auto: from contact coverage
+    "tidsforfald": 0.15,           # auto: from days since last interaction
+    "linkedin": 0.10,              # auto: from contacts' LinkedIn connections
+    "kendskab_behov": 0.15,        # manual: 0-10
+    "workshops": 0.10,             # manual: 0-10
+    "marketing": 0.15,             # manual: 0-10 (reagerer paa vores marketing)
+}
+
+def score_color_100(score):
+    """Return color for 0-100 score."""
+    if score >= 70:
+        return "groen"
+    elif score >= 40:
+        return "gul"
+    return "roed"
+
 # ─── Score ───
-INTERACTION_POINTS = {"meeting": 20, "phone": 10, "email": 5, "linkedin": 3}
+INTERACTION_POINTS = {
+    "meeting_task": 25, "meeting": 15, "meeting_event": 8,
+    "phone": 10, "email": 5, "linkedin": 3, "campaign": 2,
+}
 DECAY_BRACKETS = [(14, 1.0), (30, 0.85), (60, 0.65), (90, 0.45), (180, 0.25)]
 DIVERSITY_SCORES = {1: 5, 2: 10, 3: 15, 4: 20}
+# Map meeting subtypes to base 'meeting' for diversity calculation
+DIVERSITY_TYPE_MAP = {"meeting_task": "meeting", "meeting_event": "meeting"}
 
 def get_decay_factor(days):
     if days is None:
@@ -358,50 +552,22 @@ def get_decay_factor(days):
             return factor
     return 0.10
 
-def calculate_company_score(company_id):
-    conn = get_db()
-    company = conn.execute("SELECT id, name, sector, rating, account_manager_id FROM companies WHERE id = ?", (company_id,)).fetchone()
-    if not company:
-        conn.close()
-        return None
-    company = dict(company)
-
-    # Get account manager name
-    am_name = None
-    if company.get("account_manager_id"):
-        am_row = conn.execute("SELECT name FROM users WHERE id = ?", (company["account_manager_id"],)).fetchone()
-        if am_row:
-            am_name = am_row["name"]
-
-    contacts = conn.execute("SELECT id FROM contacts WHERE company_id = ?", (company_id,)).fetchall()
-    total_contacts = len(contacts)
-    contact_ids = [c["id"] for c in contacts]
-
-    if not contact_ids:
-        conn.close()
-        return {"company_id": company["id"], "company_name": company["name"], "sector": company["sector"],
-                "rating": company.get("rating", "C"), "account_manager_name": am_name,
-                "score": 0, "interaction_points": 0, "coverage_points": 0, "diversity_points": 0,
-                "decay_factor": 0.10, "days_since_last": None, "total_contacts": 0, "contacted_count": 0,
-                "total_interactions": 0, "channel_types": [], "level": "kold"}
-
-    placeholders = ",".join("?" * len(contact_ids))
-    interactions = [dict(r) for r in conn.execute(
-        "SELECT type, date, contact_id FROM interactions WHERE contact_id IN ({}) ORDER BY date DESC".format(placeholders),
-        contact_ids).fetchall()]
-    conn.close()
-
-    total_interactions = len(interactions)
+def _calc_sub_scores(company, contacts_data, interactions, total_contacts):
+    """Calculate 7 sub-scores (each 0-10) for the combined relationsscore."""
+    # 1. Kontaktfrekvens (auto): interaction points scaled to 0-10
     raw_points = sum(INTERACTION_POINTS.get(i["type"], 0) for i in interactions)
     interaction_points = min(raw_points, 60)
+    s_kontaktfrekvens = round(min(interaction_points / 6, 10), 1)  # 60 → 10
 
+    # 2. Kontaktdaekning (auto): coverage + diversity scaled to 0-10
     contacted_ids = set(i["contact_id"] for i in interactions)
     contacted_count = len(contacted_ids)
-    coverage_points = round((contacted_count / total_contacts * 20) if total_contacts > 0 else 0, 1)
+    coverage_pct = (contacted_count / total_contacts * 100) if total_contacts > 0 else 0
+    channel_types = list(set(DIVERSITY_TYPE_MAP.get(i["type"], i["type"]) for i in interactions))
+    diversity_bonus = min(len(channel_types), 4)  # 0-4 bonus points
+    s_kontaktdaekning = round(min(coverage_pct / 10 + diversity_bonus * 0.5, 10), 1)
 
-    channel_types = list(set(i["type"] for i in interactions))
-    diversity_points = DIVERSITY_SCORES.get(len(channel_types), 20) if channel_types else 0
-
+    # 3. Tidsforfald (auto): decay factor scaled to 0-10
     days_since_last = None
     if interactions:
         try:
@@ -409,21 +575,115 @@ def calculate_company_score(company_id):
             days_since_last = (date.today() - last_date).days
         except (ValueError, TypeError):
             pass
-
     decay_factor = get_decay_factor(days_since_last)
-    score = round((interaction_points + coverage_points + diversity_points) * decay_factor, 1)
+    s_tidsforfald = round(decay_factor * 10, 1)
+
+    # 4. LinkedIn (auto): % of contacts connected on LinkedIn (systemate OR settl)
+    li_connected = 0
+    for c in contacts_data:
+        if c.get("linkedin_connected_systemate") or c.get("linkedin_connected_settl"):
+            li_connected += 1
+    s_linkedin = round(min((li_connected / total_contacts * 10) if total_contacts > 0 else 0, 10), 1)
+
+    # 5-7. Manual scores (0-10)
+    s_kendskab = min(company.get("score_kendskab_behov", 0) or 0, 10)
+    s_workshops = min(company.get("score_workshops", 0) or 0, 10)
+    s_marketing = min(company.get("score_marketing", 0) or 0, 10)
+
+    sub_scores = {
+        "kontaktfrekvens": s_kontaktfrekvens,
+        "kontaktdaekning": s_kontaktdaekning,
+        "tidsforfald": s_tidsforfald,
+        "linkedin": s_linkedin,
+        "kendskab_behov": s_kendskab,
+        "workshops": s_workshops,
+        "marketing": s_marketing,
+    }
+
+    # Combined score (0-100)
+    combined = sum(sub_scores[k] * SCORE_WEIGHTS[k] for k in SCORE_WEIGHTS) * 10
+    combined = round(min(combined, 100), 1)
+
+    return sub_scores, combined, {
+        "interaction_points": interaction_points,
+        "contacted_count": contacted_count,
+        "total_interactions": len(interactions),
+        "channel_types": channel_types,
+        "days_since_last": days_since_last,
+        "decay_factor": decay_factor,
+        "coverage_pct": round(coverage_pct, 1),
+        "li_connected": li_connected,
+    }
+
+
+def calculate_company_score(company_id):
+    conn = get_db()
+    company = conn.execute("SELECT * FROM companies WHERE id = ?", (company_id,)).fetchone()
+    if not company:
+        conn.close()
+        return None
+    company = dict(company)
+
+    am_name = None
+    if company.get("account_manager_id"):
+        am_row = conn.execute("SELECT name FROM users WHERE id = ?", (company["account_manager_id"],)).fetchone()
+        if am_row:
+            am_name = am_row["name"]
+
+    contacts_data = [dict(r) for r in conn.execute("SELECT * FROM contacts WHERE company_id = ?", (company_id,)).fetchall()]
+    total_contacts = len(contacts_data)
+    contact_ids = [c["id"] for c in contacts_data]
+
+    mx = {"importance": company.get("importance", "middel_vigtig"), "sales_stage": company.get("sales_stage", "tidlig_fase"),
+          "score_kendskab_behov": company.get("score_kendskab_behov", 0) or 0,
+          "score_workshops": company.get("score_workshops", 0) or 0,
+          "score_marketing": company.get("score_marketing", 0) or 0}
+
+    empty_sub = {"kontaktfrekvens": 0, "kontaktdaekning": 0, "tidsforfald": 0,
+                 "linkedin": 0, "kendskab_behov": 0, "workshops": 0, "marketing": 0}
+
+    if not contact_ids:
+        conn.close()
+        return {"company_id": company["id"], "company_name": company["name"], "sector": company["sector"],
+                "tier": company.get("tier"), "rating": company.get("rating", "C"), "account_manager_name": am_name,
+                "score": 0, "sub_scores": empty_sub, "interaction_points": 0,
+                "decay_factor": 0.10, "days_since_last": None, "total_contacts": 0, "contacted_count": 0,
+                "total_interactions": 0, "channel_types": [], "level": "kold",
+                "coverage_pct": 0, "li_connected": 0, "score_color": "roed", **mx}
+
+    placeholders = ",".join("?" * len(contact_ids))
+    interactions = [dict(r) for r in conn.execute(
+        "SELECT type, date, contact_id FROM interactions WHERE contact_id IN ({}) ORDER BY date DESC".format(placeholders),
+        contact_ids).fetchall()]
+
+    decay_penalty_rules = [dict(r) for r in conn.execute(
+        "SELECT * FROM score_decay_rules WHERE is_active = 1 ORDER BY inactivity_days").fetchall()]
+    conn.close()
+
+    sub_scores, score, details = _calc_sub_scores(company, contacts_data, interactions, total_contacts)
+
+    # Apply same inactivity penalty as calculate_all_scores
+    penalty = 0
+    if details["days_since_last"] is not None:
+        for rule in decay_penalty_rules:
+            if details["days_since_last"] >= rule["inactivity_days"]:
+                penalty = rule["penalty_points"]
+    score = max(0, round(score - penalty, 1))
+
     level = "staerk" if score >= 80 else "god" if score >= 50 else "svag" if score >= 20 else "kold"
 
     return {"company_id": company["id"], "company_name": company["name"], "sector": company["sector"],
-            "rating": company.get("rating", "C"), "account_manager_name": am_name,
-            "score": score, "interaction_points": interaction_points, "coverage_points": coverage_points,
-            "diversity_points": diversity_points, "decay_factor": decay_factor, "days_since_last": days_since_last,
-            "total_contacts": total_contacts, "contacted_count": contacted_count,
-            "total_interactions": total_interactions, "channel_types": channel_types, "level": level}
+            "tier": company.get("tier"), "rating": company.get("rating", "C"), "account_manager_name": am_name,
+            "score": score, "sub_scores": sub_scores,
+            "interaction_points": details["interaction_points"],
+            "decay_factor": details["decay_factor"], "days_since_last": details["days_since_last"],
+            "total_contacts": total_contacts, "contacted_count": details["contacted_count"],
+            "total_interactions": details["total_interactions"], "channel_types": details["channel_types"],
+            "level": level, "penalty": penalty, "coverage_pct": details["coverage_pct"],
+            "li_connected": details["li_connected"], "score_color": score_color_100(score), **mx}
 
 def calculate_all_scores(conn):
-    """Batch-calculate scores for ALL companies using a single DB connection."""
-    # Load configurable decay penalty rules
+    """Batch-calculate combined scores for ALL companies using a single DB connection."""
     decay_penalty_rules = [dict(r) for r in conn.execute(
         "SELECT * FROM score_decay_rules WHERE is_active = 1 ORDER BY inactivity_days").fetchall()]
 
@@ -434,10 +694,13 @@ def calculate_all_scores(conn):
     if not companies:
         return []
 
-    # 1) Contact counts per company
-    contact_counts = {}
-    for r in conn.execute("SELECT company_id, COUNT(*) AS cnt FROM contacts GROUP BY company_id").fetchall():
-        contact_counts[r["company_id"]] = r["cnt"]
+    # 1) Contacts per company (with linkedin fields)
+    contacts_by_company = {}
+    for r in conn.execute("SELECT id, company_id, linkedin_connected_systemate, linkedin_connected_settl FROM contacts").fetchall():
+        cid = r["company_id"]
+        if cid not in contacts_by_company:
+            contacts_by_company[cid] = []
+        contacts_by_company[cid].append(dict(r))
 
     # 2) Tags per company
     tags_by_company = {}
@@ -461,63 +724,56 @@ def calculate_all_scores(conn):
             interactions_by_company[cid] = []
         interactions_by_company[cid].append(dict(r))
 
-    # 3) Calculate score per company in Python
+    # 4) Calculate combined score per company
+    empty_sub = {"kontaktfrekvens": 0, "kontaktdaekning": 0, "tidsforfald": 0,
+                 "linkedin": 0, "kendskab_behov": 0, "workshops": 0, "marketing": 0}
     results = []
     for company in companies:
         cid = company["id"]
-        total_contacts = contact_counts.get(cid, 0)
+        contacts_data = contacts_by_company.get(cid, [])
+        total_contacts = len(contacts_data)
         interactions = interactions_by_company.get(cid, [])
+
+        mx = {"importance": company.get("importance", "middel_vigtig"),
+              "sales_stage": company.get("sales_stage", "tidlig_fase"),
+              "score_kendskab_behov": company.get("score_kendskab_behov", 0) or 0,
+              "score_workshops": company.get("score_workshops", 0) or 0,
+              "score_marketing": company.get("score_marketing", 0) or 0}
 
         if total_contacts == 0 or not interactions:
             results.append({
                 "company_id": cid, "company_name": company["name"], "sector": company["sector"],
-                "rating": company.get("rating", "C"), "account_manager_name": company.get("account_manager_name"),
-                "score": 0, "interaction_points": 0, "coverage_points": 0, "diversity_points": 0,
+                "tier": company.get("tier"), "rating": company.get("rating", "C"),
+                "account_manager_name": company.get("account_manager_name"),
+                "score": 0, "sub_scores": empty_sub, "interaction_points": 0,
                 "decay_factor": 0.10, "days_since_last": None, "total_contacts": total_contacts,
                 "contacted_count": 0, "total_interactions": 0, "channel_types": [], "level": "kold",
-                "tags": tags_by_company.get(cid, [])})
+                "score_color": "roed", "tags": tags_by_company.get(cid, []), **mx})
             continue
 
-        total_interactions = len(interactions)
-        raw_points = sum(INTERACTION_POINTS.get(i["type"], 0) for i in interactions)
-        interaction_points = min(raw_points, 60)
-
-        contacted_ids = set(i["contact_id"] for i in interactions)
-        contacted_count = len(contacted_ids)
-        coverage_points = round((contacted_count / total_contacts * 20) if total_contacts > 0 else 0, 1)
-
-        channel_types = list(set(i["type"] for i in interactions))
-        diversity_points = DIVERSITY_SCORES.get(len(channel_types), 20) if channel_types else 0
-
-        days_since_last = None
-        if interactions:
-            try:
-                last_date = date.fromisoformat(interactions[0]["date"])
-                days_since_last = (date.today() - last_date).days
-            except (ValueError, TypeError):
-                pass
-
-        decay_factor = get_decay_factor(days_since_last)
-        score = round((interaction_points + coverage_points + diversity_points) * decay_factor, 1)
+        sub_scores, score, details = _calc_sub_scores(company, contacts_data, interactions, total_contacts)
 
         # Apply configurable penalty points for inactivity
         penalty = 0
-        if days_since_last is not None:
+        if details["days_since_last"] is not None:
             for rule in decay_penalty_rules:
-                if days_since_last >= rule["inactivity_days"]:
-                    penalty = rule["penalty_points"]  # Use highest matching penalty
+                if details["days_since_last"] >= rule["inactivity_days"]:
+                    penalty = rule["penalty_points"]
         score = max(0, round(score - penalty, 1))
 
         level = "staerk" if score >= 80 else "god" if score >= 50 else "svag" if score >= 20 else "kold"
 
         results.append({
             "company_id": cid, "company_name": company["name"], "sector": company["sector"],
-            "rating": company.get("rating", "C"), "account_manager_name": company.get("account_manager_name"),
-            "score": score, "interaction_points": interaction_points, "coverage_points": coverage_points,
-            "diversity_points": diversity_points, "decay_factor": decay_factor, "days_since_last": days_since_last,
-            "total_contacts": total_contacts, "contacted_count": contacted_count,
-            "total_interactions": total_interactions, "channel_types": channel_types, "level": level,
-            "penalty": penalty, "tags": tags_by_company.get(cid, [])})
+            "tier": company.get("tier"), "rating": company.get("rating", "C"),
+            "account_manager_name": company.get("account_manager_name"),
+            "score": score, "sub_scores": sub_scores,
+            "interaction_points": details["interaction_points"],
+            "decay_factor": details["decay_factor"], "days_since_last": details["days_since_last"],
+            "total_contacts": total_contacts, "contacted_count": details["contacted_count"],
+            "total_interactions": details["total_interactions"], "channel_types": details["channel_types"],
+            "level": level, "penalty": penalty, "score_color": score_color_100(score),
+            "tags": tags_by_company.get(cid, []), **mx})
 
     # Save score snapshot to history (max 1 per day per company)
     today = date.today().isoformat()
@@ -665,14 +921,31 @@ class CRMHandler(SimpleHTTPRequestHandler):
                 p = []
                 if "sector" in params:
                     q += " AND c.sector = ?"; p.append(params["sector"][0])
+                if "tier" in params:
+                    q += " AND c.tier = ?"; p.append(params["tier"][0])
                 if "rating" in params:
                     q += " AND c.rating = ?"; p.append(params["rating"][0])
                 if "account_manager_id" in params:
                     q += " AND c.account_manager_id = ?"; p.append(int(params["account_manager_id"][0]))
                 if "search" in params:
                     q += " AND c.name LIKE ?"; p.append("%{}%".format(params["search"][0]))
+                if "tag_id" in params:
+                    q += " AND c.id IN (SELECT company_id FROM company_tags WHERE tag_id = ?)"
+                    p.append(int(params["tag_id"][0]))
                 q += " ORDER BY c.name"
-                self._json_response([dict(r) for r in conn.execute(q, p).fetchall()])
+                rows = [dict(r) for r in conn.execute(q, p).fetchall()]
+                # Attach tags to each company
+                tags_map = {}
+                for r in conn.execute(
+                        """SELECT ct.company_id, t.id, t.name, t.color
+                           FROM company_tags ct JOIN tags t ON ct.tag_id = t.id ORDER BY t.name""").fetchall():
+                    cid = r["company_id"]
+                    if cid not in tags_map:
+                        tags_map[cid] = []
+                    tags_map[cid].append({"id": r["id"], "name": r["name"], "color": r["color"]})
+                for row in rows:
+                    row["tags"] = tags_map.get(row["id"], [])
+                self._json_response(rows)
 
             elif path.startswith("/api/companies/") and path.endswith("/full") and path.count("/") == 4:
                 # Combined company detail endpoint (1 request instead of 10)
@@ -686,13 +959,13 @@ class CRMHandler(SimpleHTTPRequestHandler):
                 score = calculate_company_score(cid)
                 interactions = [dict(r) for r in conn.execute(
                     """SELECT i.*, ct.first_name || ' ' || ct.last_name AS contact_name, u.name AS user_name
-                       FROM interactions i JOIN contacts ct ON i.contact_id = ct.id
+                       FROM interactions i LEFT JOIN contacts ct ON i.contact_id = ct.id
                        LEFT JOIN users u ON i.user_id = u.id
-                       WHERE ct.company_id = ? ORDER BY i.date DESC""", (cid,)).fetchall()]
+                       WHERE (ct.company_id = ? OR i.company_id = ?) ORDER BY i.date DESC""", (cid, cid)).fetchall()]
                 emails = [dict(r) for r in conn.execute(
                     """SELECT e.* FROM emails e LEFT JOIN interactions i ON e.interaction_id = i.id
                        LEFT JOIN contacts ct ON i.contact_id = ct.id WHERE ct.company_id = ? ORDER BY e.date_sent DESC""", (cid,)).fetchall()]
-                users = [dict(r) for r in conn.execute("SELECT * FROM users ORDER BY name").fetchall()]
+                users = [dict(r) for r in conn.execute("SELECT * FROM users WHERE deleted_at IS NULL ORDER BY name").fetchall()]
                 tasks = [dict(r) for r in conn.execute(
                     """SELECT t.*, c.name AS company_name, u1.name AS assigned_to_name, u2.name AS created_by_name,
                        ct.first_name || ' ' || ct.last_name AS contact_name
@@ -724,12 +997,16 @@ class CRMHandler(SimpleHTTPRequestHandler):
                         "SELECT t.* FROM tags t JOIN contact_tags ct ON t.id = ct.tag_id WHERE ct.contact_id = ? ORDER BY t.name", (c["id"],)).fetchall()]
                 # All tags (for autocomplete)
                 all_tags = [dict(r) for r in conn.execute("SELECT * FROM tags ORDER BY name").fetchall()]
+                tenders = [dict(r) for r in conn.execute(
+                    """SELECT t.*, u.name AS responsible_name
+                       FROM tenders t LEFT JOIN users u ON t.responsible_id = u.id
+                       WHERE t.company_id = ? ORDER BY t.created_at DESC""", (cid,)).fetchall()]
                 self._json_response({
                     "company": dict(company), "contacts": contacts, "score": score,
                     "interactions": interactions, "emails": emails, "users": users,
                     "tasks": tasks, "audit_log": audit,
                     "linkedin_activities": li_activities, "linkedin_engagements": li_engagements,
-                    "company_tags": company_tags, "all_tags": all_tags
+                    "company_tags": company_tags, "all_tags": all_tags, "tenders": tenders
                 })
 
             elif path.startswith("/api/companies/") and path.count("/") == 3:
@@ -762,7 +1039,7 @@ class CRMHandler(SimpleHTTPRequestHandler):
             # Interactions
             elif path == "/api/interactions":
                 q = """SELECT i.*, c.first_name || ' ' || c.last_name AS contact_name, u.name AS user_name
-                       FROM interactions i JOIN contacts c ON i.contact_id = c.id
+                       FROM interactions i LEFT JOIN contacts c ON i.contact_id = c.id
                        LEFT JOIN users u ON i.user_id = u.id WHERE 1=1"""
                 p = []
                 if "contact_id" in params:
@@ -776,7 +1053,7 @@ class CRMHandler(SimpleHTTPRequestHandler):
 
             # Users
             elif path == "/api/users":
-                self._json_response([dict(r) for r in conn.execute("SELECT * FROM users ORDER BY name").fetchall()])
+                self._json_response([dict(r) for r in conn.execute("SELECT * FROM users WHERE deleted_at IS NULL ORDER BY name").fetchall()])
 
             # Emails
             elif path == "/api/emails":
@@ -870,6 +1147,36 @@ class CRMHandler(SimpleHTTPRequestHandler):
                     return self._error(404, "Sag ikke fundet")
                 self._json_response(dict(row))
 
+            # Task notes
+            elif path.startswith("/api/tasks/") and path.endswith("/notes"):
+                tid = int(path.split("/")[-2])
+                rows = [dict(r) for r in conn.execute(
+                    "SELECT * FROM task_notes WHERE task_id = ? ORDER BY created_at DESC", (tid,)).fetchall()]
+                self._json_response(rows)
+
+            # Task history (audit log for this task)
+            elif path.startswith("/api/tasks/") and path.endswith("/history"):
+                tid = int(path.split("/")[-2])
+                rows = [dict(r) for r in conn.execute(
+                    """SELECT * FROM audit_log WHERE entity_type = 'task' AND entity_id = ?
+                       ORDER BY created_at DESC""", (tid,)).fetchall()]
+                self._json_response(rows)
+
+            # Tender notes
+            elif path.startswith("/api/tenders/") and path.endswith("/notes"):
+                tid = int(path.split("/")[-2])
+                rows = [dict(r) for r in conn.execute(
+                    "SELECT * FROM tender_notes WHERE tender_id = ? ORDER BY created_at DESC", (tid,)).fetchall()]
+                self._json_response(rows)
+
+            # Tender history (audit log for this tender)
+            elif path.startswith("/api/tenders/") and path.endswith("/history"):
+                tid = int(path.split("/")[-2])
+                rows = [dict(r) for r in conn.execute(
+                    """SELECT * FROM audit_log WHERE entity_type = 'tender' AND entity_id = ?
+                       ORDER BY created_at DESC""", (tid,)).fetchall()]
+                self._json_response(rows)
+
             # Audit log
             elif path == "/api/audit-log":
                 q = "SELECT * FROM audit_log WHERE 1=1"
@@ -948,6 +1255,23 @@ class CRMHandler(SimpleHTTPRequestHandler):
                 q += " ORDER BY le.observed_date DESC LIMIT 50"
                 self._json_response([dict(r) for r in conn.execute(q, p).fetchall()])
 
+            # Score history aggregate (avg per day across all companies)
+            elif path == "/api/score-history/aggregate":
+                rows = conn.execute("""
+                    SELECT recorded_at AS date,
+                           ROUND(AVG(score), 1) AS avg_score,
+                           COUNT(*) AS total_companies,
+                           SUM(CASE WHEN level='staerk' THEN 1 ELSE 0 END) AS strong,
+                           SUM(CASE WHEN level='god' THEN 1 ELSE 0 END) AS good,
+                           SUM(CASE WHEN level='svag' THEN 1 ELSE 0 END) AS weak,
+                           SUM(CASE WHEN level='kold' THEN 1 ELSE 0 END) AS cold
+                    FROM score_history
+                    GROUP BY recorded_at
+                    ORDER BY recorded_at ASC
+                    LIMIT 90
+                """).fetchall()
+                self._json_response([dict(r) for r in rows])
+
             # Dashboard - combined endpoint (1 request instead of 2)
             elif path == "/api/dashboard/all":
                 scores = calculate_all_scores(conn)
@@ -964,20 +1288,32 @@ class CRMHandler(SimpleHTTPRequestHandler):
                     }
                 all_tags = [dict(r) for r in conn.execute("SELECT * FROM tags ORDER BY name").fetchall()]
 
-                # Recent activities (last 14 days) - unified feed from multiple tables
-                recent_activities = [dict(r) for r in conn.execute("""
-                    SELECT 'interaction' AS source, i.id, i.date AS activity_date, i.type AS sub_type,
-                           i.subject, co.id AS company_id, co.name AS company_name,
+                # Accept days or from_date param
+                if "from_date" in params:
+                    from_date = params["from_date"][0]
+                    date_cutoff = f"'{from_date}'"
+                else:
+                    days = max(1, min(365, int(params.get("days", ["14"])[0])))
+                    date_cutoff = f"date('now', '-{days} days')"
+
+                # Recent activities - unified feed from multiple tables
+                recent_activities = [dict(r) for r in conn.execute(f"""
+                    SELECT 'interaction' AS source, i.id, i.id AS entity_id,
+                           i.date AS activity_date, i.type AS sub_type,
+                           i.subject, COALESCE(co.id, co2.id) AS company_id,
+                           COALESCE(co.name, co2.name) AS company_name,
                            ct.first_name||' '||ct.last_name AS contact_name, u.name AS user_name
                     FROM interactions i
-                    JOIN contacts ct ON i.contact_id = ct.id
-                    JOIN companies co ON ct.company_id = co.id
+                    LEFT JOIN contacts ct ON i.contact_id = ct.id
+                    LEFT JOIN companies co ON ct.company_id = co.id
+                    LEFT JOIN companies co2 ON i.company_id = co2.id
                     LEFT JOIN users u ON i.user_id = u.id
-                    WHERE i.date >= date('now', '-14 days')
+                    WHERE i.date >= {date_cutoff}
 
                     UNION ALL
 
-                    SELECT 'task' AS source, t.id, COALESCE(t.completed_at, t.created_at) AS activity_date,
+                    SELECT 'task' AS source, t.id, t.id AS entity_id,
+                           COALESCE(t.completed_at, t.created_at) AS activity_date,
                            t.category AS sub_type, t.title AS subject,
                            co.id AS company_id, co.name AS company_name,
                            ct.first_name||' '||ct.last_name AS contact_name, u.name AS user_name
@@ -985,22 +1321,77 @@ class CRMHandler(SimpleHTTPRequestHandler):
                     JOIN companies co ON t.company_id = co.id
                     LEFT JOIN contacts ct ON t.contact_id = ct.id
                     LEFT JOIN users u ON t.assigned_to = u.id
-                    WHERE t.created_at >= date('now', '-14 days') OR t.completed_at >= date('now', '-14 days')
+                    WHERE t.created_at >= {date_cutoff} OR (t.completed_at IS NOT NULL AND t.completed_at >= {date_cutoff})
 
                     UNION ALL
 
-                    SELECT 'linkedin_activity' AS source, la.id, la.activity_date, la.activity_type AS sub_type,
+                    SELECT 'task_note' AS source, tn.id, t.id AS entity_id,
+                           tn.created_at AS activity_date, 'note' AS sub_type,
+                           tn.content AS subject,
+                           co.id AS company_id, co.name AS company_name,
+                           NULL AS contact_name, tn.user_name AS user_name
+                    FROM task_notes tn
+                    JOIN tasks t ON tn.task_id = t.id
+                    JOIN companies co ON t.company_id = co.id
+                    WHERE tn.created_at >= {date_cutoff}
+
+                    UNION ALL
+
+                    SELECT 'tender_note' AS source, tn.id, t.id AS entity_id,
+                           tn.created_at AS activity_date, 'note' AS sub_type,
+                           tn.content AS subject,
+                           co.id AS company_id, co.name AS company_name,
+                           NULL AS contact_name, tn.user_name AS user_name
+                    FROM tender_notes tn
+                    JOIN tenders t ON tn.tender_id = t.id
+                    JOIN companies co ON t.company_id = co.id
+                    WHERE tn.created_at >= {date_cutoff}
+
+                    UNION ALL
+
+                    SELECT 'tender' AS source, al.id, t.id AS entity_id,
+                           al.created_at AS activity_date, al.action AS sub_type,
+                           CASE al.action
+                               WHEN 'update' THEN t.title || ' → ' || COALESCE(json_extract(al.details, '$.status'), '')
+                               ELSE t.title
+                           END AS subject,
+                           co.id AS company_id, co.name AS company_name,
+                           NULL AS contact_name, al.user_name AS user_name
+                    FROM audit_log al
+                    JOIN tenders t ON al.entity_id = t.id
+                    JOIN companies co ON t.company_id = co.id
+                    WHERE al.entity_type = 'tender' AND al.action IN ('create', 'update')
+                    AND al.created_at >= {date_cutoff}
+
+                    UNION ALL
+
+                    SELECT 'contact' AS source, al.id, ct.company_id AS entity_id,
+                           al.created_at AS activity_date, 'create' AS sub_type,
+                           al.entity_name AS subject,
+                           co.id AS company_id, co.name AS company_name,
+                           al.entity_name AS contact_name, al.user_name AS user_name
+                    FROM audit_log al
+                    JOIN contacts ct ON al.entity_id = ct.id
+                    JOIN companies co ON ct.company_id = co.id
+                    WHERE al.entity_type = 'contact' AND al.action = 'create'
+                    AND al.created_at >= {date_cutoff}
+
+                    UNION ALL
+
+                    SELECT 'linkedin_activity' AS source, la.id, la.id AS entity_id,
+                           la.activity_date, la.activity_type AS sub_type,
                            la.content_summary AS subject, co.id AS company_id, co.name AS company_name,
                            ct.first_name||' '||ct.last_name AS contact_name, u.name AS user_name
                     FROM linkedin_activities la
                     JOIN contacts ct ON la.contact_id = ct.id
                     JOIN companies co ON ct.company_id = co.id
                     LEFT JOIN users u ON la.observed_by = u.id
-                    WHERE la.activity_date >= date('now', '-14 days')
+                    WHERE la.activity_date >= {date_cutoff}
 
                     UNION ALL
 
-                    SELECT 'linkedin_engagement' AS source, le.id, le.observed_date AS activity_date,
+                    SELECT 'linkedin_engagement' AS source, le.id, le.id AS entity_id,
+                           le.observed_date AS activity_date,
                            le.engagement_type AS sub_type, le.notes AS subject,
                            co.id AS company_id, co.name AS company_name,
                            ct.first_name||' '||ct.last_name AS contact_name, u.name AS user_name
@@ -1008,10 +1399,10 @@ class CRMHandler(SimpleHTTPRequestHandler):
                     JOIN contacts ct ON le.contact_id = ct.id
                     JOIN companies co ON ct.company_id = co.id
                     LEFT JOIN users u ON le.observed_by = u.id
-                    WHERE le.observed_date >= date('now', '-14 days')
+                    WHERE le.observed_date >= {date_cutoff}
 
                     ORDER BY activity_date DESC
-                    LIMIT 50
+                    LIMIT 100
                 """).fetchall()]
 
                 # Previous scores for delta indicators
@@ -1029,7 +1420,21 @@ class CRMHandler(SimpleHTTPRequestHandler):
                     ps = prev_scores.get(s["company_id"])
                     s["previous_score"] = ps
 
-                self._json_response({"scores": scores, "stats": stats, "all_tags": all_tags, "recent_activities": recent_activities})
+                # Active tenders (not won/lost/dropped)
+                active_tenders = [dict(r) for r in conn.execute("""
+                    SELECT t.id, t.title, t.status, t.deadline, t.estimated_value,
+                           co.id AS company_id, co.name AS company_name,
+                           u.name AS responsible_name,
+                           (SELECT COUNT(*) FROM tender_sections ts WHERE ts.tender_id = t.id) AS total_sections,
+                           (SELECT COUNT(*) FROM tender_sections ts WHERE ts.tender_id = t.id AND ts.status = 'approved') AS approved_sections
+                    FROM tenders t
+                    JOIN companies co ON t.company_id = co.id
+                    LEFT JOIN users u ON t.responsible_id = u.id
+                    WHERE t.status NOT IN ('won', 'lost', 'dropped')
+                    ORDER BY t.deadline ASC
+                """).fetchall()]
+
+                self._json_response({"scores": scores, "stats": stats, "all_tags": all_tags, "recent_activities": recent_activities, "active_tenders": active_tenders})
 
             elif path == "/api/dashboard/scores":
                 scores = calculate_all_scores(conn)
@@ -1124,7 +1529,7 @@ class CRMHandler(SimpleHTTPRequestHandler):
                        LEFT JOIN users u2 ON ts.reviewer_id = u2.id
                        WHERE ts.tender_id = ?
                        ORDER BY ts.sort_order, ts.id""", (tid,)).fetchall()]
-                users = [dict(r) for r in conn.execute("SELECT * FROM users ORDER BY name").fetchall()]
+                users = [dict(r) for r in conn.execute("SELECT * FROM users WHERE deleted_at IS NULL ORDER BY name").fetchall()]
                 companies = [dict(r) for r in conn.execute("SELECT id, name FROM companies ORDER BY name").fetchall()]
                 self._json_response({
                     "tender": dict(tender), "sections": sections,
@@ -1168,10 +1573,20 @@ class CRMHandler(SimpleHTTPRequestHandler):
         try:
             if path == "/api/companies":
                 cur = conn.execute(
-                    "INSERT INTO companies (name, sector, address, city, zip_code, website, notes, rating, account_manager_id) VALUES (?,?,?,?,?,?,?,?,?)",
+                    """INSERT INTO companies (name, sector, address, city, zip_code, website, notes, rating, account_manager_id,
+                       importance, sales_stage, score_cxo, score_kontaktfrekvens, score_kontaktbredde, score_kendskab, score_historik,
+                       tier, ejerform, has_el, has_gas, has_vand, has_varme, has_spildevand, has_affald, est_kunder)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (body["name"], body.get("sector"), body.get("address"), body.get("city"),
                      body.get("zip_code"), body.get("website"), body.get("notes"),
-                     body.get("rating", "C"), body.get("account_manager_id")))
+                     body.get("rating", "C"), body.get("account_manager_id"),
+                     body.get("importance", "middel_vigtig"), body.get("sales_stage", "tidlig_fase"),
+                     body.get("score_cxo", 0), body.get("score_kontaktfrekvens", 0),
+                     body.get("score_kontaktbredde", 0), body.get("score_kendskab", 0), body.get("score_historik", 0),
+                     body.get("tier"), body.get("ejerform"),
+                     body.get("has_el", 0), body.get("has_gas", 0), body.get("has_vand", 0),
+                     body.get("has_varme", 0), body.get("has_spildevand", 0), body.get("has_affald", 0),
+                     body.get("est_kunder")))
                 conn.commit()
                 row = conn.execute(
                     "SELECT c.*, u.name AS account_manager_name FROM companies c LEFT JOIN users u ON c.account_manager_id = u.id WHERE c.id = ?",
@@ -1196,17 +1611,23 @@ class CRMHandler(SimpleHTTPRequestHandler):
                 self._json_response(dict(row), 201)
 
             elif path == "/api/interactions":
+                contact_id = body.get("contact_id") or None
+                company_id = body.get("company_id") or None
+                # Auto-derive company_id from contact if not provided
+                if contact_id and not company_id:
+                    row = conn.execute("SELECT company_id FROM contacts WHERE id = ?", (contact_id,)).fetchone()
+                    if row: company_id = row["company_id"]
                 cur = conn.execute(
-                    "INSERT INTO interactions (contact_id,user_id,type,date,subject,notes) VALUES (?,?,?,?,?,?)",
-                    (body["contact_id"], body.get("user_id"), body["type"], body["date"],
+                    "INSERT INTO interactions (contact_id,company_id,user_id,type,date,subject,notes) VALUES (?,?,?,?,?,?,?)",
+                    (contact_id, company_id, body.get("user_id"), body["type"], body["date"],
                      body.get("subject"), body.get("notes")))
                 conn.commit()
                 row = conn.execute(
                     """SELECT i.*, c.first_name||' '||c.last_name AS contact_name, u.name AS user_name
-                       FROM interactions i JOIN contacts c ON i.contact_id=c.id LEFT JOIN users u ON i.user_id=u.id
+                       FROM interactions i LEFT JOIN contacts c ON i.contact_id=c.id LEFT JOIN users u ON i.user_id=u.id
                        WHERE i.id=?""", (cur.lastrowid,)).fetchone()
                 log_audit(conn, uid, "create", "interaction", cur.lastrowid, body.get("subject", body["type"]),
-                          {"type": body["type"], "contact_id": body["contact_id"]})
+                          {"type": body["type"], "contact_id": contact_id})
                 conn.commit()
                 self._json_response(dict(row), 201)
 
@@ -1221,6 +1642,16 @@ class CRMHandler(SimpleHTTPRequestHandler):
                 log_audit(conn, uid, "create", "user", cur.lastrowid, body["name"])
                 conn.commit()
                 self._json_response(dict(row), 201)
+
+            elif path.startswith("/api/users/") and path.endswith("/restore"):
+                uid_restore = int(path.split("/")[-2])
+                conn.execute("UPDATE users SET deleted_at = NULL WHERE id = ?", (uid_restore,))
+                conn.commit()
+                row = conn.execute("SELECT * FROM users WHERE id = ?", (uid_restore,)).fetchone()
+                if row:
+                    log_audit(conn, uid, "restore", "user", uid_restore, row["name"])
+                    conn.commit()
+                self._json_response(dict(row) if row else {})
 
             elif path == "/api/tasks":
                 cur = conn.execute(
@@ -1238,6 +1669,41 @@ class CRMHandler(SimpleHTTPRequestHandler):
                 log_audit(conn, uid, "create", "task", cur.lastrowid, body["title"],
                           {"category": body["category"], "company_id": body["company_id"]})
                 conn.commit()
+                self._json_response(dict(row), 201)
+
+            # Task notes
+            elif path.startswith("/api/tasks/") and path.endswith("/notes"):
+                tid = int(path.split("/")[-2])
+                user_name = None
+                if uid:
+                    ur = conn.execute("SELECT name FROM users WHERE id=?", (uid,)).fetchone()
+                    if ur: user_name = ur["name"]
+                cur = conn.execute(
+                    """INSERT INTO task_notes (task_id, user_id, user_name, content, note_type, metadata)
+                       VALUES (?,?,?,?,?,?)""",
+                    (tid, uid, user_name, body.get("content", ""),
+                     body.get("note_type", "note"), body.get("metadata")))
+                conn.commit()
+                log_audit(conn, uid, "add_note", "task", tid, body.get("content", "")[:80])
+                conn.commit()
+                row = conn.execute("SELECT * FROM task_notes WHERE id = ?", (cur.lastrowid,)).fetchone()
+                self._json_response(dict(row), 201)
+
+            # Tender notes
+            elif path.startswith("/api/tenders/") and path.endswith("/notes"):
+                tid = int(path.split("/")[-2])
+                user_name = None
+                if uid:
+                    ur = conn.execute("SELECT name FROM users WHERE id=?", (uid,)).fetchone()
+                    if ur: user_name = ur["name"]
+                cur = conn.execute(
+                    """INSERT INTO tender_notes (tender_id, user_id, user_name, content)
+                       VALUES (?,?,?,?)""",
+                    (tid, uid, user_name, body.get("content", "")))
+                conn.commit()
+                log_audit(conn, uid, "add_note", "tender", tid, body.get("content", "")[:80])
+                conn.commit()
+                row = conn.execute("SELECT * FROM tender_notes WHERE id = ?", (cur.lastrowid,)).fetchone()
                 self._json_response(dict(row), 201)
 
             elif path == "/api/linkedin-activities":
@@ -1355,7 +1821,7 @@ class CRMHandler(SimpleHTTPRequestHandler):
                             (tender_id, ts["title"], ts["description"], section_deadline, section_start, section_end, ts["sort_order"]))
                 conn.commit()
                 log_audit(conn, uid, "create", "tender", tender_id, body["title"],
-                          json.dumps({"company_id": body["company_id"]}))
+                          {"company_id": body["company_id"]})
                 conn.commit()
                 row = conn.execute(
                     """SELECT t.*, c.name AS company_name FROM tenders t
@@ -1442,7 +1908,7 @@ class CRMHandler(SimpleHTTPRequestHandler):
 
     # ─── File upload ───
     def _handle_file_upload(self, path):
-        if path != "/api/emails/upload":
+        if path not in ("/api/emails/upload", "/api/tasks/upload-email"):
             return self._error(404, "Endpoint not found")
 
         uid = self._get_user_id()
@@ -1486,13 +1952,47 @@ class CRMHandler(SimpleHTTPRequestHandler):
         if not (file_name.lower().endswith(".eml") or file_name.lower().endswith(".msg")):
             return self._error(400, f"Filtypen '{file_name.rsplit('.', 1)[-1]}' er ikke understottet. Kun .eml filer er tilladt. Tip: Traek emailen fra Outlook til Skrivebordet foerst, saa dannes en .eml fil.")
 
+        parsed = parse_eml(file_content)
+
+        # Task email upload — save as a task note
+        if path == "/api/tasks/upload-email":
+            task_id = fields.get("task_id")
+            if not task_id:
+                return self._error(400, "task_id er paakraevet")
+            user_name = None
+            if uid:
+                conn = get_db()
+                ur = conn.execute("SELECT name FROM users WHERE id=?", (uid,)).fetchone()
+                if ur: user_name = ur["name"]
+                conn.close()
+            email_summary = "Fra: {}\nTil: {}\nDato: {}\nEmne: {}\n\n{}".format(
+                parsed["from_email"] or "", parsed["to_email"] or "",
+                parsed["date_sent"] or "", parsed["subject"] or "",
+                (parsed["body_text"] or "")[:2000])
+            metadata = json.dumps({"from": parsed["from_email"], "to": parsed["to_email"],
+                                   "cc": parsed["cc"], "date_sent": parsed["date_sent"],
+                                   "filename": file_name})
+            conn = get_db()
+            try:
+                cur = conn.execute(
+                    """INSERT INTO task_notes (task_id, user_id, user_name, content, note_type, metadata)
+                       VALUES (?,?,?,?,?,?)""",
+                    (int(task_id), uid, user_name, email_summary, "email", metadata))
+                conn.commit()
+                log_audit(conn, uid, "import_email", "task", int(task_id), file_name)
+                conn.commit()
+                row = conn.execute("SELECT * FROM task_notes WHERE id = ?", (cur.lastrowid,)).fetchone()
+                self._json_response(dict(row), 201)
+            finally:
+                conn.close()
+            return
+
         contact_id = fields.get("contact_id")
         if not contact_id:
             return self._error(400, "contact_id er paakraevet")
 
         user_id = fields.get("user_id") or None
 
-        parsed = parse_eml(file_content)
         conn = get_db()
         try:
             interaction_date = parsed["date_sent"][:10] if parsed["date_sent"] else None
@@ -1535,9 +2035,20 @@ class CRMHandler(SimpleHTTPRequestHandler):
                     e["account_manager_id"] = body["account_manager_id"]
                 conn.execute(
                     """UPDATE companies SET name=?,sector=?,address=?,city=?,zip_code=?,website=?,notes=?,
-                       rating=?,account_manager_id=? WHERE id=?""",
+                       rating=?,account_manager_id=?,importance=?,sales_stage=?,
+                       score_cxo=?,score_kontaktfrekvens=?,score_kontaktbredde=?,score_kendskab=?,score_historik=?,
+                       score_kendskab_behov=?,score_workshops=?,score_marketing=?,
+                       tier=?,ejerform=?,has_el=?,has_gas=?,has_vand=?,has_varme=?,has_spildevand=?,has_affald=?,est_kunder=? WHERE id=?""",
                     (e["name"], e["sector"], e["address"], e["city"], e["zip_code"],
-                     e["website"], e["notes"], e.get("rating", "C"), e.get("account_manager_id"), cid))
+                     e["website"], e["notes"], e.get("rating", "C"), e.get("account_manager_id"),
+                     e.get("importance", "middel_vigtig"), e.get("sales_stage", "tidlig_fase"),
+                     e.get("score_cxo", 0), e.get("score_kontaktfrekvens", 0),
+                     e.get("score_kontaktbredde", 0), e.get("score_kendskab", 0), e.get("score_historik", 0),
+                     e.get("score_kendskab_behov", 0), e.get("score_workshops", 0), e.get("score_marketing", 0),
+                     e.get("tier"), e.get("ejerform"),
+                     e.get("has_el", 0), e.get("has_gas", 0), e.get("has_vand", 0),
+                     e.get("has_varme", 0), e.get("has_spildevand", 0), e.get("has_affald", 0),
+                     e.get("est_kunder"), cid))
                 conn.commit()
                 if changes:
                     log_audit(conn, uid, "update", "company", cid, e["name"], changes)
@@ -1602,6 +2113,15 @@ class CRMHandler(SimpleHTTPRequestHandler):
                        WHERE t.id = ?""", (tid,)).fetchone()
                 self._json_response(dict(row))
 
+            # Rename tag
+            elif path.startswith("/api/tags/") and path.count("/") == 3:
+                tid = int(path.split("/")[-1])
+                conn.execute("UPDATE tags SET name=?, color=? WHERE id=?",
+                             (body["name"], body.get("color", "#6b7280"), tid))
+                conn.commit()
+                row = conn.execute("SELECT * FROM tags WHERE id=?", (tid,)).fetchone()
+                self._json_response(dict(row))
+
             # Notifications
             elif path.startswith("/api/notifications/") and path.endswith("/read"):
                 nid = int(path.split("/")[-2])
@@ -1613,6 +2133,24 @@ class CRMHandler(SimpleHTTPRequestHandler):
                 conn.execute("UPDATE notifications SET is_read = 1 WHERE is_read = 0")
                 conn.commit()
                 self._json_response({"ok": True})
+
+            # Edit task note
+            elif path.startswith("/api/task-notes/") and path.count("/") == 3:
+                nid = int(path.split("/")[-1])
+                conn.execute("UPDATE task_notes SET content = ? WHERE id = ?",
+                             (body.get("content", ""), nid))
+                conn.commit()
+                row = conn.execute("SELECT * FROM task_notes WHERE id = ?", (nid,)).fetchone()
+                self._json_response(dict(row))
+
+            # Edit tender note
+            elif path.startswith("/api/tender-notes/") and path.count("/") == 3:
+                nid = int(path.split("/")[-1])
+                conn.execute("UPDATE tender_notes SET content = ? WHERE id = ?",
+                             (body.get("content", ""), nid))
+                conn.commit()
+                row = conn.execute("SELECT * FROM tender_notes WHERE id = ?", (nid,)).fetchone()
+                self._json_response(dict(row))
 
             # Score settings
             elif path == "/api/settings/score-thresholds":
@@ -1661,7 +2199,7 @@ class CRMHandler(SimpleHTTPRequestHandler):
                      e.get("estimated_value"), e.get("portal_link"), e.get("notes"), tid))
                 conn.commit()
                 log_audit(conn, uid, "update", "tender", tid, e["title"],
-                          json.dumps({"status": e["status"]}))
+                          {"status": e["status"]})
                 conn.commit()
                 row = conn.execute(
                     """SELECT t.*, c.name AS company_name FROM tenders t
@@ -1817,10 +2355,10 @@ class CRMHandler(SimpleHTTPRequestHandler):
             elif path.startswith("/api/users/") and path.count("/") == 3:
                 uid_del = int(path.split("/")[-1])
                 row = conn.execute("SELECT name FROM users WHERE id = ?", (uid_del,)).fetchone()
-                conn.execute("DELETE FROM users WHERE id = ?", (uid_del,))
+                conn.execute("UPDATE users SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?", (uid_del,))
                 conn.commit()
                 if row:
-                    log_audit(conn, uid, "delete", "user", uid_del, row["name"])
+                    log_audit(conn, uid, "deactivate", "user", uid_del, row["name"])
                     conn.commit()
                 self._no_content()
 
@@ -1934,23 +2472,166 @@ if __name__ == "__main__":
         conn.executescript("""
             INSERT INTO users (name, email, role) VALUES ('Jess Kristensen', 'jess@systemate.dk', 'admin');
             INSERT INTO users (name, email, role) VALUES ('Thomas Nielsen', 'thomas@systemate.dk', 'user');
-            INSERT INTO companies (name, sector, city, zip_code, rating) VALUES ('Energi Fyn', 'el', 'Odense', '5000', 'A');
-            INSERT INTO companies (name, sector, city, zip_code, rating) VALUES ('TREFOR Vand', 'vand', 'Vejle', '7100', 'B');
-            INSERT INTO companies (name, sector, city, zip_code, rating) VALUES ('Fjernvarme Fyn', 'varme', 'Odense', '5000', 'B');
-            INSERT INTO companies (name, sector, city, zip_code, rating) VALUES ('Verdo', 'multiforsyning', 'Randers', '8900', 'A');
-            INSERT INTO companies (name, sector, city, zip_code, rating) VALUES ('EWII', 'multiforsyning', 'Kolding', '6000', 'C');
-            INSERT INTO companies (name, sector, city, zip_code, rating) VALUES ('Aarhus Vand', 'vand', 'Aarhus', '8000', 'B');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Forsyning Helsingør','multiforsyning','Helsingør','T1','Kommunalt',1,0,1,1,1,1,'~61.000 borgere','Fuld 5-arts: Forsyning Elnet+Kronborg El + vand+varme+spildevand+affald. ~150 ans.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Frederikshavn Forsyning','multiforsyning','Frederikshavn','T1','Kommunalt',1,0,1,1,1,1,'~62.000 borgere','Fuld 5-arts: Frh. Elhandel+Elnet + vand+varme+spildevand+affald. ~250 ans.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('EWII (TREFOR)','multiforsyning','Kolding','T1','Selvejende',1,0,1,1,0,0,'~400.000 kunderelationer','El(net+handel), vand, fjernvarme, fiber. ~700 ans.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Verdo','multiforsyning','Randers/Herning','T1','Andel',1,0,1,1,0,0,'~100.000 kunder','Fjernvarme(~75k), vand, el(Kongerslev elnet+elhandel).');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Bornholms Energi & Forsyning','multiforsyning','Rønne','T1','Forbrugerejet',1,0,1,1,1,0,'~28.000 borgere','El(handel), vand, varme, spildevand.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Energi Viborg','multiforsyning','Viborg','T1','Kommunalt',1,0,1,0,1,0,'~45.000 borgere','El(net Kimbrer), vand, spildevand, gadelys. ~105 ans.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Læsø Forsyning','multiforsyning','Læsø','T1','Kommunalt',1,0,1,1,1,1,'~1.800 husstande','Fuld multi: elnet+vand+varme+spildevand+renovation.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Struer Energi','multiforsyning','Struer','T1','Kommunalt',1,0,1,1,1,0,'~11.000 borgere','Multi: el(net), fjernvarme, vand, spildevand.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Tønder Forsyning','multiforsyning','Tønder','T1','Kommunalt',1,0,1,1,1,1,'~40.000 borgere','Multi: el(handel), vand, fjernvarme, spildevand, affald.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Energi Ikast','multiforsyning','Ikast','T1','Andel',1,0,1,1,0,0,'~8.000-10.000 kunder','El(Ikast El Net+Samstrøm), varme, fiber. Afregner vand+spildevand. ~40 ans.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('GEV (Grindsted)','multiforsyning','Grindsted','T1','Andel',1,0,1,1,0,0,'~7.000 hjem','Multi: el(GEV Elnet+Samstrøm), vand, varme.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Vildbjerg Tekniske Værker','multiforsyning','Vildbjerg','T1','Andel',1,0,1,1,0,0,'~3.000-4.000 kunder','Vildbjerg Elværk+Vandværk+Varmeværk. Samstrøm.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Energi Hurup','multiforsyning','Hurup Thy','T1','Andel',1,0,1,1,0,0,'~2.600 vandkunder','Hurup Elværk+Fjernvarme+Vandværk. Samstrøm.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Sunds Forsyning','multiforsyning','Sunds','T1','Andel',1,0,1,1,0,0,'~2.500-3.000','Elnet+Samstrøm, vandværk, varme.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Videbæk Energiforsyning','multiforsyning','Videbæk','T1','Andel',1,0,1,1,0,0,'~3.000-4.000','Elnet+Samstrøm, vandværk, fjernvarme.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Vest Forsyning (Holstebro)','multiforsyning','Holstebro','T1','Kommunalt',1,0,1,1,1,1,'~58.000 borgere','Multi: el(handel), vand, varme, spildevand, affald.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('SK Forsyning (Slagelse)','multiforsyning','Slagelse','T1','Kommunalt',1,0,1,1,1,0,'~80.000 borgere','Multi: el(SK Energi=elhandel), vand, varme, spildevand.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Vesthimmerlands Elforsyning','multiforsyning','Aars','T1','Andel',1,0,0,1,0,0,'~15.000 elkunder','Elnet (Aars-Hornum Net)+elhandel. Tilknyttet lokal varme.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Andel (Andel Energi+Cerius+Radius)','multiforsyning','Sjælland/hele DK','T2','Andel',1,1,0,0,0,0,'~1.200.000 elkunder
+Elnet:1.400.000','DK''s største el. Elhandel+gas+elnet+fiber.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Norlys (N1, Stofa, Boxer)','el','Jylland/hele DK','T2','Andel',1,0,0,0,0,0,'~1.700.000 kunderelationer','El(net N1+handel), tele/fiber, TV. ~4.500 ans.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('NRGi (Konstant/Dinel)','el','Østjylland/hele DK','T2','Andel',1,0,0,0,0,0,'~140.000 elkunder','Elhandel, elnet, fiber, energirådgivning. ~1.600 ans.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Energi Fyn','multiforsyning','Fyn/hele DK','T2','Andel',1,1,0,0,0,0,'~220.000 elkunder','Elnet+elhandel, naturgas, fiber. ~390 ans.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Ørsted','el','Hele DK/globalt','T2','Børsnoteret',1,0,0,0,0,0,'Primært B2B/VE-produktion','VE-gigant. Vindmøller, solceller. Tidl. DONG. Ikke retail-el i stor stil.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('AURA Energi','el','Østjylland','T2','Andel',1,0,0,0,0,0,'~100.000+ kunder','Elhandel, elnet, fiber.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('SEF (Sydfyns Elforsyning)','multiforsyning','Sydfyn/hele DK','T2','Selvejende fond',1,1,0,0,0,0,'Sydfyn + landsdk.','El(FLOW Elnet+SEF Energi), naturgas, fiber, varmepumper. ~160 ans.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Thy-Mors Energi','el','Thy/Mors','T2','Andel',1,0,0,0,0,0,'~44.000 andelshavere','Elnet(Elværk)+elhandel, fiber.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('OK','el','Hele DK','T2','Andel',1,0,0,0,0,0,'Stor kundebasis','Andelsselskab. Brændstof+el+ladning.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Nord Energi','el','Nordjylland','T2','Andel',1,0,0,0,0,0,'Nordjylland','Elnetselskab+elhandel.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Jysk Energi','el','Jylland','T2','Privat',1,0,0,0,0,0,'Voksende','Elhandelsselskab.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Vindstød','el','Hele DK','T2','Privat',1,0,0,0,0,0,'Voksende','Dansk vindenergi direkte.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Barry','el','Hele DK','T2','Privat',1,0,0,0,0,0,'Voksende','App-baseret elselskab. Timepriser.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('True Energy','el','Hele DK','T2','Privat',1,0,0,0,0,0,'Voksende','Smart-el-app med forbrugsstyring.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('b.energy','el','Hele DK','T2','Privat',1,0,0,0,0,0,'Mindre','Elhandelsselskab.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('NettoPower','el','Hele DK','T2','Privat',1,0,0,0,0,0,'Voksende','Lavpris-el, grøn profil.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Modstrøm','el','Hele DK','T2','Privat',1,0,0,0,0,0,'Voksende','Elhandelsselskab.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Velkommen','el','Hele DK','T2','Privat',1,0,0,0,0,0,'Mindre','Elhandelsselskab.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Go Energi','el','Hele DK','T2','Privat',1,0,0,0,0,0,'Mindre','Elhandelsselskab.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Cheap Energy','el','Hele DK','T2','Privat',1,0,0,0,0,0,'Mindre','Elhandelsselskab.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Edison','el','Hele DK','T2','Privat',1,0,0,0,0,0,'Mindre','Elhandelsselskab.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Elektron','el','Hele DK','T2','Privat',1,0,0,0,0,0,'Mindre','Elhandelsselskab.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Forskel','el','Hele DK','T2','Privat',1,0,0,0,0,0,'Mindre','Elhandelsselskab.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('FRI Energy','el','Hele DK','T2','Privat',1,0,0,0,0,0,'Mindre','Elhandelsselskab.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('GNP Energy','el','Hele DK','T2','Privat',1,0,0,0,0,0,'Mindre','Elhandelsselskab (norsk oprindelse).');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Grøn El-Forsyning','el','Hele DK','T2','Privat',1,0,0,0,0,0,'Mindre','Elhandelsselskab.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('EnergiPlus','el','Hele DK','T2','Privat',1,0,0,0,0,0,'Mindre','Elhandelsselskab.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Kärnfull Energi','el','Hele DK','T2','Privat',1,0,0,0,0,0,'Mindre','Svensk atomkraft-elselskab i DK.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Natur-Energi','el','Hele DK','T2','Privat',1,0,0,0,0,0,'Mindre','Elhandelsselskab.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Nordisk Energy','el','Hele DK','T2','Privat',1,0,0,0,0,0,'Mindre','Elhandelsselskab.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Norsk Elkraft Danmark','el','Hele DK','T2','Privat',1,0,0,0,0,0,'Mindre','Norsk elhandelsselskab i DK.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Ø-strøm','el','Hele DK','T2','Privat',1,0,0,0,0,0,'Mindre','Elhandelsselskab.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Power4U','el','Hele DK','T2','Privat',1,0,0,0,0,0,'Mindre','Elhandelsselskab.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Preasy','el','Hele DK','T2','Privat',1,0,0,0,0,0,'Mindre','Elhandelsselskab.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Strømlinet','el','Hele DK','T2','Privat',1,0,0,0,0,0,'Mindre','Elhandelsselskab.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('strømtid','el','Hele DK','T2','Privat',1,0,0,0,0,0,'Mindre','Elhandelsselskab.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Vets Energi','el','Hele DK','T2','Privat',1,0,0,0,0,0,'Mindre','Elhandelsselskab.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Samstrøm','el','Jylland','T2','Fællesejet',1,0,0,0,0,0,'Partner for 8 værker','Fælles elhandelsselskab for GEV,Ikast,Sunds,Hjerting,Tarm,Videbæk,VTV,Hurup.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('SK Energi (SK Forsyning)','el','Slagelse','T2','Kommunalt',1,0,0,0,0,0,'Slagelse-omr.','Elhandel. Del af SK Forsyning-koncern (som er Tier 1).');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('nef Fonden (Nordvestjysk)','el','Nordvestjylland','T2','Fond',1,0,0,0,0,0,'Nordvestjylland','Elhandel/energi. Fond.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('E.ON Danmark','el','Hele DK','T2','Privat/koncern',1,0,0,0,0,0,'B2B','Tysk energikoncern. El til erhverv i DK.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Energidrift','el','Hele DK','T2','Privat',1,0,0,0,0,0,'Mindre','Elhandelsselskab.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Energiselskabet Elg','el','Hele DK','T2','Privat',1,0,0,0,0,0,'Mindre','Elhandelsselskab.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Energi Danmark / Mind Energy','multiforsyning','Hele DK/Norden','T2','Privat/koncern',1,1,0,0,0,0,'Primært B2B','Energitrading. Del af Andel-koncern.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Danske Commodities','multiforsyning','Hele DK/Europa','T2','Privat/koncern',1,1,0,0,0,0,'Primært B2B','Energitrading. Ejet af Equinor.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('DCC Energi','el','Hele DK','T2','Privat',1,0,0,0,0,0,'B2B','Energihandel/trading.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Energy Nordic','el','Hele DK','T2','Privat',1,0,0,0,0,0,'B2B','Energihandel/erhverv.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Cerius (Andel)','el','Sjælland','T2','Andel',1,0,0,0,0,0,'~590.000 netkunder','Netselskab.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Radius Elnet (Andel)','el','Storkøbenhavn','T2','Andel',1,0,0,0,0,0,'~800.000 netkunder','Netselskab.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('N1 (Norlys)','el','Jylland','T2','Andel',1,0,0,0,0,0,'~600.000+ netkunder','Jyllands største net.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('TREFOR El-Net (EWII)','el','Trekantomr.','T2','Selvejende',1,0,0,0,0,0,'Trekantomr.','Netselskab.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('TREFOR El-Net Øst (EWII)','el','Bornholm','T2','Selvejende',1,0,0,0,0,0,'Bornholm','Netselskab.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Konstant Net (NRGi)','el','Aarhus','T2','Andel',1,0,0,0,0,0,'Aarhus','Netselskab.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Dinel (NRGi)','el','Djursland','T2','Andel',1,0,0,0,0,0,'Djursland','Netselskab.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('NOE Net','el','Midtjylland','T2','Andel',1,0,0,0,0,0,'Midtjylland','Netselskab.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('RAH Net','el','Ringkøbing','T2','Andel',1,0,0,0,0,0,'Ringk.-Skjern','Netselskab.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('FLOW Elnet (SEF)','el','Sydfyn','T2','Selvejende',1,0,0,0,0,0,'Sydfyn/Langeland','Netselskab. Del af SEF.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Vores Elnet','el','Fredericia/Vejle','T2','Andel',1,0,0,0,0,0,'Fred./Vejle','Netselskab.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('+ ca. 25 øvrige små netselskaber','el','Hele DK','T2','Diverse',1,0,0,0,0,0,'Varierende','Ravdex,Veksel,Elinord,Elektrus,NKE,Zeanet,L-Net,Nakskov,Hammel,Midtfyns,Aal m.fl.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('HOFOR','multiforsyning','København (8 komm.)','T3','Kommunalt',0,1,1,1,1,0,'~1.000.000 vandkunder','DK''s største vand. Vand 8 komm., varme+gas+køling KBH. ~1.700 ans.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Aalborg Forsyning','multiforsyning','Aalborg','T3','Kommunalt',0,1,1,1,1,0,'~100.000+ husstande','Multi: varme,gas,køling,vand,spildevand. ~500 ans.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Frederiksberg Forsyning','multiforsyning','Frederiksberg','T3','Kommunalt',0,1,1,1,1,0,'~55.000 borgere','Gas(bygas),vand,fjernvarme,fjernkøling,spildevand,VE. IKKE el.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Silkeborg Forsyning','multiforsyning','Silkeborg','T3','Kommunalt',0,0,1,1,1,1,'~96.000 borgere','Vand,fjernvarme,spildevand,affald. ~140 ans.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('FORS A/S','multiforsyning','Holbæk/Lejre/Roskilde','T3','Kommunalt',0,0,1,1,1,1,'~100.000+ borgere','Multi 3 kommuner.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Din Forsyning','multiforsyning','Esbjerg/Varde','T3','Kommunalt',0,0,1,1,1,1,'~120.000 borgere','Multi: vand,varme,spildevand,affald.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Halsnæs Forsyning','multiforsyning','Frederiksværk','T3','Kommunalt',0,0,1,1,1,1,'~31.000 borgere','Fjernvarme,vand,spildevand,affald.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Provas','multiforsyning','Haderslev','T3','Kommunalt',0,0,1,1,1,1,'~55.000 borgere','Vand,varme,spildevand,affald.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Kalundborg Forsyning','multiforsyning','Kalundborg','T3','Kommunalt',0,0,1,1,1,1,'~49.000 borgere','Vand,varme,spildevand,affald.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('REFA','multiforsyning','Lolland-Falster','T3','Kommunalt',0,0,0,1,0,1,'~100.000 borgere','Kraftvarme(affald+halm),genbrugspladser.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Klar Forsyning','multiforsyning','Slagelse','T3','Kommunalt',0,0,1,1,1,0,'~80.000 borgere','Vand,fjernvarme,spildevand.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Sønderborg Forsyning','multiforsyning','Sønderborg','T3','Kommunalt',0,0,1,1,1,0,'~75.000 borgere','Vand,fjernvarme,spildevand.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Næstved Forsyning','multiforsyning','Næstved','T3','Kommunalt',0,0,1,1,1,0,'~83.000 borgere','Vand,fjernvarme,spildevand.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Skanderborg Forsyning','multiforsyning','Skanderborg','T3','Kommunalt',0,0,1,1,1,0,'~60.000 borgere','Vand,varme,spildevand.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Ringsted Forsyning','multiforsyning','Ringsted','T3','Kommunalt',0,0,1,1,1,0,'~35.000 borgere','Vand,fjernvarme,spildevand.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Sorø Forsyning','multiforsyning','Sorø','T3','Kommunalt',0,0,1,1,1,0,'~30.000 borgere','Vand,fjernvarme,spildevand.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Assens Forsyning','multiforsyning','Assens','T3','Kommunalt',0,0,1,1,1,0,'~41.000 borgere','Vand,fjernvarme,spildevand.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Kerteminde Forsyning','multiforsyning','Kerteminde','T3','Kommunalt',0,0,1,1,1,0,'~24.000 borgere','Vand,varme,spildevand.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Middelfart Forsyning','multiforsyning','Middelfart','T3','Kommunalt',0,0,1,1,1,0,'~38.000 borgere','Varme,vand,spildevand.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Skive Vand/Fjernvarme','multiforsyning','Skive','T3','Kommunalt',0,0,1,1,1,0,'~47.000 borgere','Vand,fjernvarme,spildevand.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Horsens Vand/Samn Forsyning','multiforsyning','Horsens/Odder','T3','Kommunalt',0,0,1,0,1,0,'~90.000 borgere','Vand og spildevand.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Kolding Forsyning (BlueKolding)','multiforsyning','Kolding','T3','Kommunalt',0,0,1,0,1,0,'~92.000 borgere','Vand og spildevand.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Herning Vand','multiforsyning','Herning','T3','Kommunalt',0,0,1,0,1,0,'~50.000 borgere','Vand+spildevand.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Hjørring Vandselskab','multiforsyning','Hjørring','T3','Kommunalt',0,0,1,0,1,0,'~66.000 borgere','Vand+spildevand.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Favrskov Forsyning','multiforsyning','Hadsten','T3','Kommunalt',0,0,1,0,1,0,'~48.000 borgere','Vand og spildevand.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Vejle Spildevand/Varme','multiforsyning','Vejle','T3','Kommunalt',0,0,0,1,1,0,'~55.000 borgere','Fjernvarme+spildevand.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Roskilde Forsyning','multiforsyning','Roskilde','T3','Kommunalt',0,0,1,1,1,0,'~88.000 borgere','Vand,varme,spildevand.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Billund Vand','multiforsyning','Billund','T3','Kommunalt',0,0,1,0,1,0,'~26.000 borgere','Vand,spildevand.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Novafos','multiforsyning','Nordsjælland(9 komm.)','T4','Kommunalt',0,0,1,0,1,0,'~300.000+ borgere','DK''s 2. største vand/spildevand.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('VandCenter Syd','multiforsyning','Odense/Nordfyn','T4','Kommunalt',0,0,1,0,1,0,'~220.000 borgere','Drikkevand og spildevand.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Aarhus Vand','multiforsyning','Aarhus','T4','Kommunalt',0,0,1,0,1,0,'~350.000 borgere','Drikkevand og spildevand.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('BIOFOS','spildevand','Storkøbenhavn','T4','Kommunalt',0,0,0,0,1,0,'~1.200.000 borgere','DK''s største spildevandsrensning.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Kredsløb (Aarhus)','multiforsyning','Aarhus','T4','Kommunalt',0,0,0,1,0,1,'~350.000 borgere','Fjernvarme+affald.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Fjernvarme Fyn','varme','Odense','T4','Kommunalt',0,0,0,1,0,0,'~85.000 kunder','DK''s 3. største fjernvarme.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Vestforbrænding','multiforsyning','Vestegnen','T4','Kommunalt',0,0,0,1,0,1,'~900.000 borgere','DK''s største affald.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('ARC','multiforsyning','København','T4','Kommunalt',0,0,0,1,0,1,'~600.000 borgere','Affaldsforbrænding+varme.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('ARGO','multiforsyning','Roskilde','T4','Kommunalt',0,0,0,1,0,1,'~470.000 borgere','Affald,genbrug,fjernvarme.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Evida','gas','Hele DK','T4','Statsligt',0,1,0,0,0,0,'~400.000 gasmålere','National gasdistributør.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('CTR','varme','Storkøbenhavn','T4','Kommunalt',0,0,0,1,0,0,'Transmission','Fjernvarmetransmission.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('VEKS','varme','Vestegnen','T4','Kommunalt',0,0,0,1,0,0,'13 kommuner','Fjernvarmetransmission.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Nordværk','multiforsyning','Aalborg','T4','Kommunalt',0,0,0,1,0,1,'Nordjylland','Affaldsforbrænding+fjernvarme.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('AVV','multiforsyning','Hjørring','T4','Kommunalt',0,0,0,1,0,1,'~75.000 borgere','Affaldsbehandling+fjernvarme.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('~350+ fjernvarmeværker','varme','Hele DK','T4','Primært andel',0,0,0,1,0,0,'~1.800.000 husstande','Ca. 400 fjernvarmeselskaber i DK.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('~2.600 vandværker','vand','Hele DK','T4','Primært andel',0,0,1,0,0,0,'Varierende','Mange forbrugerejede.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Clever','e-mobilitet','Hele DK','EM','Privat (Andel)',1,0,0,0,0,0,'~200.000+ brugere
+~3.000 ladepunkter','DK''s største ladeoperatør. Abonnements-model. Opladning af elbiler.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Looad','e-mobilitet','Hele DK','EM','Privat',1,0,0,0,0,0,'Voksende','Ladeoperatør. Ladebokse+abonnement.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Circle K / Ladning','e-mobilitet','Hele DK','EM','Privat',1,0,0,0,0,0,'Landsdækkende','Tankstationer + lynladere til elbiler.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Spirii','e-mobilitet','Hele DK','EM','Privat',1,0,0,0,0,0,'Platform','Ladeplatform/software til CPO''er.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('E.ON Drive','e-mobilitet','Hele DK','EM','Privat/koncern',1,0,0,0,0,0,'Voksende','Ladeinfrastruktur.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('EWII Lading','e-mobilitet','Hele DK','EM','Selvejende',1,0,0,0,0,0,'~4.000 ladepunkter','EWIIs ladenetværk.');
+            INSERT INTO companies (name,sector,city,tier,ejerform,has_el,has_gas,has_vand,has_varme,has_spildevand,has_affald,est_kunder,notes) VALUES ('Tesla Supercharger','e-mobilitet','Hele DK','EM','Privat',1,0,0,0,0,0,'DK-stationer','Lukket→åbent netværk.');
         """)
-        contacts = [
-            (1,"Lars","Hansen","CEO","lars@energifyn.dk",1),(1,"Mette","Andersen","CFO","mette@energifyn.dk",0),
-            (1,"Peter","Skov","Afregningschef","peter@energifyn.dk",1),(2,"Anne","Mortensen","CEO","anne@trefor.dk",0),
-            (2,"Henrik","Olsen","COO","henrik@trefor.dk",1),(3,"Soeren","Frederiksen","CEO","soren@fjernvarmefyn.dk",0),
-            (4,"Camilla","Thomsen","CEO","camilla@verdo.dk",1),(4,"Michael","Nielsen","Kundechef","michael@verdo.dk",0),
-            (5,"Birgitte","Jensen","CCO","birgitte@ewii.dk",0),(6,"Kasper","Holm","CEO","kasper@aarhusvand.dk",0),
+        # Lookup helper for company IDs by name
+        def cid(name):
+            r = conn.execute("SELECT id FROM companies WHERE name LIKE ?", (name + '%',)).fetchone()
+            return r[0] if r else None
+
+        seed_contacts = [
+            ("EWII", "Lars", "Hansen", "CEO", "lars@ewii.dk", 1),
+            ("EWII", "Mette", "Andersen", "CFO", "mette@ewii.dk", 0),
+            ("EWII", "Peter", "Skov", "Afregningschef", "peter@ewii.dk", 1),
+            ("Verdo", "Camilla", "Thomsen", "CEO", "camilla@verdo.dk", 1),
+            ("Verdo", "Michael", "Nielsen", "Kundechef", "michael@verdo.dk", 0),
+            ("Forsyning Helsingør", "Anne", "Mortensen", "CEO", "anne@LFH.dk", 0),
+            ("Forsyning Helsingør", "Henrik", "Olsen", "COO", "henrik@LFH.dk", 1),
+            ("Frederikshavn", "Soeren", "Frederiksen", "CEO", "soren@LFF.dk", 0),
+            ("Bornholms", "Birgitte", "Jensen", "CCO", "birgitte@bef.dk", 0),
+            ("Energi Viborg", "Kasper", "Holm", "CEO", "kasper@LEvib.dk", 0),
+            ("Norlys", "Thomas", "Larsen", "VP Sales", "thomas@norlys.dk", 1),
+            ("Norlys", "Kirsten", "Berg", "CTO", "kirsten@norlys.dk", 0),
+            ("Andel Energi", "Jens", "Petersen", "CEO", "jens@andel.dk", 1),
+            ("Ørsted", "Maria", "Christensen", "Key Account Mgr", "maria@orsted.dk", 0),
+            ("Radius", "Anders", "Johansen", "Driftschef", "anders@radius.dk", 1),
         ]
-        for cid, fn, ln, title, em, li in contacts:
-            conn.execute("INSERT INTO contacts (company_id,first_name,last_name,title,email,on_linkedin_list) VALUES (?,?,?,?,?,?)",
-                         (cid, fn, ln, title, em, li))
+        for comp, fn, ln, title, em, li in seed_contacts:
+            company_id = cid(comp)
+            if company_id:
+                conn.execute("INSERT INTO contacts (company_id,first_name,last_name,title,email,on_linkedin_list) VALUES (?,?,?,?,?,?)",
+                             (company_id, fn, ln, title, em, li))
+
+        # Interactions referencing contact IDs (first 13 contacts)
         interactions = [
             (1,1,"meeting","2026-03-01","Strategimoede"),(1,1,"email","2026-03-03","Opfoelgning"),
             (2,1,"phone","2026-02-25","Budget-diskussion"),(3,2,"linkedin","2026-02-20","LinkedIn besked"),
@@ -1958,10 +2639,10 @@ if __name__ == "__main__":
             (5,2,"email","2026-02-18","Teknisk dok"),(4,1,"phone","2026-02-20","Opfoelgning"),
             (6,1,"email","2025-12-10","Introduktion"),(6,1,"phone","2025-12-15","Kort samtale"),
             (7,2,"meeting","2026-02-01","Foerste moede"),(7,2,"email","2026-02-05","Opfoelgning"),
-            (9,1,"email","2026-01-15","Indledende kontakt"),
+            (11,1,"email","2026-01-15","Indledende kontakt"),(13,1,"meeting","2026-03-05","Strategimoede"),
         ]
-        for cid, uid_seed, t, d, s in interactions:
-            conn.execute("INSERT INTO interactions (contact_id,user_id,type,date,subject) VALUES (?,?,?,?,?)", (cid,uid_seed,t,d,s))
+        for cid_i, uid_seed, t, d, s in interactions:
+            conn.execute("INSERT INTO interactions (contact_id,user_id,type,date,subject) VALUES (?,?,?,?,?)", (cid_i,uid_seed,t,d,s))
         # Tender template + sample tender
         conn.execute("INSERT INTO tender_templates (name, description, is_default) VALUES ('Standard IT-udbud', 'Standardskabelon til IT-udbud for forsyningsselskaber', 1)")
         template_sections = [

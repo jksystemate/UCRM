@@ -1529,8 +1529,8 @@ class handler(BaseHTTPRequestHandler):
                      body.get("score_cxo",0), body.get("score_kontaktfrekvens",0),
                      body.get("score_kontaktbredde",0), body.get("score_kendskab",0), body.get("score_historik",0),
                      body.get("tier"), body.get("ejerform"),
-                     body.get("has_el",False), body.get("has_gas",False), body.get("has_vand",False),
-                     body.get("has_varme",False), body.get("has_spildevand",False), body.get("has_affald",False),
+                     bool(body.get("has_el",False)), bool(body.get("has_gas",False)), bool(body.get("has_vand",False)),
+                     bool(body.get("has_varme",False)), bool(body.get("has_spildevand",False)), bool(body.get("has_affald",False)),
                      body.get("est_kunder")))
                 new_id = cur.fetchone()["id"]
                 db.commit()
@@ -1548,8 +1548,8 @@ class handler(BaseHTTPRequestHandler):
                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
                     (body["company_id"], body["first_name"], body["last_name"], body.get("title"),
                      body.get("email"), body.get("phone"), body.get("linkedin_url"),
-                     body.get("on_linkedin_list",False), body.get("notes"),
-                     body.get("linkedin_connected_systemate",False), body.get("linkedin_connected_settl",False)))
+                     bool(body.get("on_linkedin_list",False)), body.get("notes"),
+                     bool(body.get("linkedin_connected_systemate",False)), bool(body.get("linkedin_connected_settl",False))))
                 new_id = cur.fetchone()["id"]
                 db.commit()
                 row = db.execute("SELECT * FROM contacts WHERE id = %s", (new_id,)).fetchone()
@@ -1964,8 +1964,8 @@ class handler(BaseHTTPRequestHandler):
                      e.get("score_kontaktbredde",0), e.get("score_kendskab",0), e.get("score_historik",0),
                      e.get("score_kendskab_behov",0), e.get("score_workshops",0), e.get("score_marketing",0),
                      e.get("tier"), e.get("ejerform"),
-                     e.get("has_el",False), e.get("has_gas",False), e.get("has_vand",False),
-                     e.get("has_varme",False), e.get("has_spildevand",False), e.get("has_affald",False),
+                     bool(e.get("has_el",False)), bool(e.get("has_gas",False)), bool(e.get("has_vand",False)),
+                     bool(e.get("has_varme",False)), bool(e.get("has_spildevand",False)), bool(e.get("has_affald",False)),
                      e.get("est_kunder"), cid))
                 db.commit()
                 if changes:
@@ -1990,8 +1990,8 @@ class handler(BaseHTTPRequestHandler):
                        on_linkedin_list=%s,notes=%s,linkedin_connected_systemate=%s,linkedin_connected_settl=%s,
                        linkedin_last_checked=%s WHERE id=%s""",
                     (e["first_name"], e["last_name"], e["title"], e["email"], e["phone"],
-                     e["linkedin_url"], e["on_linkedin_list"], e["notes"],
-                     e.get("linkedin_connected_systemate",False), e.get("linkedin_connected_settl",False),
+                     e["linkedin_url"], bool(e["on_linkedin_list"]), e["notes"],
+                     bool(e.get("linkedin_connected_systemate",False)), bool(e.get("linkedin_connected_settl",False)),
                      e.get("linkedin_last_checked"), cid))
                 db.commit()
                 log_audit(db, uid, "update", "contact", cid, "{} {}".format(e["first_name"], e["last_name"]))
@@ -2078,7 +2078,7 @@ class handler(BaseHTTPRequestHandler):
                     db.execute(
                         "INSERT INTO score_decay_rules (inactivity_days,penalty_points,description,is_active) VALUES (%s,%s,%s,%s)",
                         (int(rule["inactivity_days"]), int(rule["penalty_points"]),
-                         rule.get("description",""), rule.get("is_active",True)))
+                         rule.get("description",""), bool(rule.get("is_active",True))))
                 db.commit()
                 log_audit(db, uid, "update", "settings", None, "decay-rules", {"rules_count": len(rules)})
                 db.commit()

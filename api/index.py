@@ -849,34 +849,46 @@ class handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        parsed = urlparse(self.path)
-        path = parsed.path
-        params = parse_qs(parsed.query)
-        if path.startswith("/api/"):
-            self._handle_api_get(path, params)
-        else:
-            self._error(404, "Not found")
+        try:
+            parsed = urlparse(self.path)
+            path = parsed.path
+            params = parse_qs(parsed.query)
+            if path.startswith("/api/"):
+                self._handle_api_get(path, params)
+            else:
+                self._error(404, "Not found")
+        except Exception as e:
+            self._error(500, str(e))
 
     def do_POST(self):
-        parsed = urlparse(self.path)
-        path = parsed.path
-        content_type = self.headers.get("Content-Type", "")
-        if "multipart/form-data" in content_type:
-            self._handle_file_upload(path)
-        elif path.startswith("/api/"):
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length)) if length else {}
-            self._handle_api_post(path, body)
+        try:
+            parsed = urlparse(self.path)
+            path = parsed.path
+            content_type = self.headers.get("Content-Type", "")
+            if "multipart/form-data" in content_type:
+                self._handle_file_upload(path)
+            elif path.startswith("/api/"):
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length)) if length else {}
+                self._handle_api_post(path, body)
+        except Exception as e:
+            self._error(500, str(e))
 
     def do_PUT(self):
-        parsed = urlparse(self.path)
-        length = int(self.headers.get("Content-Length", 0))
-        body = json.loads(self.rfile.read(length)) if length else {}
-        self._handle_api_put(parsed.path, body)
+        try:
+            parsed = urlparse(self.path)
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            self._handle_api_put(parsed.path, body)
+        except Exception as e:
+            self._error(500, str(e))
 
     def do_DELETE(self):
-        parsed = urlparse(self.path)
-        self._handle_api_delete(parsed.path)
+        try:
+            parsed = urlparse(self.path)
+            self._handle_api_delete(parsed.path)
+        except Exception as e:
+            self._error(500, str(e))
 
     def _cors_headers(self):
         self.send_header("Access-Control-Allow-Origin", "*")

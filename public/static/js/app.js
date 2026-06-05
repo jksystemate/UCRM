@@ -3138,70 +3138,139 @@ function renderActivityLog(container, notes, history, onAddNote, onEditNote) {
 // ─── Task Detail ───
 async function renderTaskDetail(container, id) {
     container.innerHTML = '<div class="text-gray-400">Indlæser...</div>';
-    const [task, notes, history] = await Promise.all([
+    const [task, notes, history, users] = await Promise.all([
         api.getTask(id),
         api.getTaskNotes(id),
-        api.getTaskHistory(id)
+        api.getTaskHistory(id),
+        api.getUsers()
     ]);
     container.innerHTML = '';
     container.className = 'ml-64 p-8 fade-in';
 
-    // Header
-    container.appendChild(h('div', { className: 'mb-6' },
-        h('a', { href: '#/tasks', className: 'text-sm text-blue-600 hover:underline mb-2 inline-block' }, '\u2190 Alle sager'),
-        h('div', { className: 'flex justify-between items-start' },
-            h('div', {},
-                h('h1', { className: 'text-2xl font-bold text-gray-900' }, task.title),
-                h('div', { className: 'flex flex-wrap gap-2 mt-2' },
-                    h('span', { className: `badge badge-${task.category}` }, CATEGORY_LABELS[task.category] || task.category),
-                    h('span', { className: `text-xs priority-${task.priority}` }, PRIORITY_LABELS[task.priority] || task.priority),
-                    h('span', { className: `text-xs px-2 py-0.5 rounded-full font-medium ${task.status === 'done' ? 'bg-green-100 text-green-700' : task.status === 'in_progress' ? 'bg-yellow-100 text-yellow-700' : 'bg-blue-100 text-blue-700'}` }, STATUS_LABELS[task.status] || task.status),
-                    task.company_name ? h('a', { href: `#/companies/${task.company_id}`, className: 'text-sm text-blue-600 hover:underline' }, task.company_name) : null,
-                    task.due_date ? h('span', { className: 'text-sm text-gray-500' }, `Frist: ${formatDate(task.due_date)}`) : null
-                )
-            ),
-            h('div', { className: 'flex gap-2' },
-                h('button', {
-                    className: 'bg-gray-100 text-gray-700 px-3 py-2 rounded-lg hover:bg-gray-200 text-sm',
-                    onClick: async () => {
-                        const newStatus = task.status === 'done' ? 'open' : 'done';
-                        await api.updateTask(id, { status: newStatus }); router();
-                    }
-                }, task.status === 'done' ? 'Genåbn' : 'Marker færdig')
-            )
-        )
-    ));
+    const iCls = 'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:border-blue-500 focus:outline-none';
 
-    if (task.description) {
-        container.appendChild(h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6' },
-            h('p', { className: 'text-gray-700' }, task.description)
+    function renderView() {
+        container.innerHTML = '';
+        container.appendChild(h('div', { className: 'mb-6' },
+            h('a', { href: '#/tasks', className: 'text-sm text-blue-600 hover:underline mb-2 inline-block' }, '\u2190 Alle sager'),
+            h('div', { className: 'flex justify-between items-start' },
+                h('div', {},
+                    h('h1', { className: 'text-2xl font-bold text-gray-900' }, task.title),
+                    h('div', { className: 'flex flex-wrap gap-2 mt-2' },
+                        h('span', { className: `badge badge-${task.category}` }, CATEGORY_LABELS[task.category] || task.category),
+                        h('span', { className: `text-xs priority-${task.priority}` }, PRIORITY_LABELS[task.priority] || task.priority),
+                        h('span', { className: `text-xs px-2 py-0.5 rounded-full font-medium ${task.status === 'done' ? 'bg-green-100 text-green-700' : task.status === 'in_progress' ? 'bg-yellow-100 text-yellow-700' : 'bg-blue-100 text-blue-700'}` }, STATUS_LABELS[task.status] || task.status),
+                        task.company_name ? h('a', { href: `#/companies/${task.company_id}`, className: 'text-sm text-blue-600 hover:underline' }, task.company_name) : null,
+                        task.due_date ? h('span', { className: 'text-sm text-gray-500' }, `Frist: ${formatDate(task.due_date)}`) : null
+                    )
+                ),
+                h('div', { className: 'flex gap-2' },
+                    h('button', {
+                        className: 'bg-white border border-gray-300 text-gray-700 px-3 py-2 rounded-lg hover:bg-gray-50 text-sm',
+                        onClick: () => renderEdit()
+                    }, 'Rediger'),
+                    h('button', {
+                        className: 'bg-gray-100 text-gray-700 px-3 py-2 rounded-lg hover:bg-gray-200 text-sm',
+                        onClick: async () => {
+                            const newStatus = task.status === 'done' ? 'open' : 'done';
+                            await api.updateTask(id, { status: newStatus }); router();
+                        }
+                    }, task.status === 'done' ? 'Genåbn' : 'Marker færdig')
+                )
+            )
         ));
+
+        if (task.description) {
+            container.appendChild(h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6' },
+                h('p', { className: 'text-gray-700' }, task.description)
+            ));
+        }
+
+        const isOverdue = task.due_date && task.due_date < new Date().toISOString().split('T')[0] && task.status !== 'done';
+        container.appendChild(h('div', { className: 'grid grid-cols-2 md:grid-cols-4 gap-4 mb-6' },
+            h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-4' },
+                h('div', { className: 'text-sm font-medium text-gray-500 mb-1' }, 'Ansvarlig'),
+                h('div', { className: 'font-semibold text-gray-900' }, task.assigned_to_name || '-')
+            ),
+            h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-4' },
+                h('div', { className: 'text-sm font-medium text-gray-500 mb-1' }, 'Oprettet af'),
+                h('div', { className: 'font-semibold text-gray-900' }, task.created_by_name || '-')
+            ),
+            h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-4' },
+                h('div', { className: 'text-sm font-medium text-gray-500 mb-1' }, 'Oprettet'),
+                h('div', { className: 'font-semibold text-gray-900' }, task.created_at ? formatDate(task.created_at.split('T')[0]) : '-')
+            ),
+            h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-4' },
+                h('div', { className: 'text-sm font-medium text-gray-500 mb-1' }, 'Frist'),
+                h('div', { className: `font-semibold ${isOverdue ? 'text-red-600' : 'text-gray-900'}` }, task.due_date ? formatDate(task.due_date) : '-')
+            )
+        ));
+
+        renderActivityLog(container, notes, history,
+            async (content) => { await api.createTaskNote(id, { content }); router(); },
+            async (noteId, content) => { await api.updateTaskNote(noteId, { content }); router(); }
+        );
     }
 
-    // Info cards
-    container.appendChild(h('div', { className: 'grid grid-cols-2 md:grid-cols-4 gap-4 mb-6' },
-        h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-4' },
-            h('div', { className: 'text-sm font-medium text-gray-500 mb-1' }, 'Ansvarlig'),
-            h('div', { className: 'font-semibold text-gray-900' }, task.assigned_to_name || '-')
-        ),
-        h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-4' },
-            h('div', { className: 'text-sm font-medium text-gray-500 mb-1' }, 'Oprettet af'),
-            h('div', { className: 'font-semibold text-gray-900' }, task.created_by_name || '-')
-        ),
-        h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-4' },
-            h('div', { className: 'text-sm font-medium text-gray-500 mb-1' }, 'Oprettet'),
-            h('div', { className: 'font-semibold text-gray-900' }, task.created_at ? formatDate(task.created_at.split('T')[0]) : '-')
-        ),
-        h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-4' },
-            h('div', { className: 'text-sm font-medium text-gray-500 mb-1' }, 'Frist'),
-            h('div', { className: `font-semibold ${task.due_date && task.due_date < new Date().toISOString().split('T')[0] && task.status !== 'done' ? 'text-red-600' : 'text-gray-900'}` }, task.due_date ? formatDate(task.due_date) : '-')
-        )
-    ));
+    function renderEdit() {
+        container.innerHTML = '';
+        container.appendChild(h('a', { href: '#/tasks', className: 'text-sm text-blue-600 hover:underline mb-4 inline-block' }, '\u2190 Alle sager'));
 
-    renderActivityLog(container, notes, history,
-        async (content) => { await api.createTaskNote(id, { content }); router(); },
-        async (noteId, content) => { await api.updateTaskNote(noteId, { content }); router(); }
-    );
+        const fld = (label, el) => h('div', {},
+            h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, label), el);
+
+        const form = h('form', {
+            className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6',
+            onSubmit: async (e) => {
+                e.preventDefault();
+                const fd = new FormData(form);
+                await api.updateTask(id, {
+                    title: fd.get('title'),
+                    category: fd.get('category'),
+                    priority: fd.get('priority'),
+                    status: fd.get('status'),
+                    description: fd.get('description') || null,
+                    assigned_to: fd.get('assigned_to') ? parseInt(fd.get('assigned_to')) : null,
+                    due_date: fd.get('due_date') || null,
+                });
+                router();
+            }
+        },
+            h('h2', { className: 'text-base font-semibold text-gray-900 mb-5' }, 'Rediger sag'),
+            h('div', { className: 'space-y-4' },
+                fld('Titel', h('input', { type: 'text', name: 'title', value: task.title || '', required: true, className: iCls })),
+                h('div', { className: 'grid grid-cols-2 md:grid-cols-4 gap-4' },
+                    fld('Kategori', h('select', { name: 'category', className: iCls },
+                        ...Object.entries(CATEGORY_LABELS).map(([k, v]) => h('option', { value: k, ...(task.category === k ? { selected: '' } : {}) }, v))
+                    )),
+                    fld('Prioritet', h('select', { name: 'priority', className: iCls },
+                        ...Object.entries(PRIORITY_LABELS).map(([k, v]) => h('option', { value: k, ...(task.priority === k ? { selected: '' } : {}) }, v))
+                    )),
+                    fld('Status', h('select', { name: 'status', className: iCls },
+                        ...Object.entries(STATUS_LABELS).map(([k, v]) => h('option', { value: k, ...(task.status === k ? { selected: '' } : {}) }, v))
+                    )),
+                    fld('Frist', h('input', { type: 'date', name: 'due_date', value: task.due_date || '', className: iCls }))
+                ),
+                fld('Ansvarlig', h('select', { name: 'assigned_to', className: iCls },
+                    h('option', { value: '' }, '\u2014 Ingen \u2014'),
+                    ...users.map(u => h('option', { value: String(u.id), ...(task.assigned_to == u.id ? { selected: '' } : {}) }, u.name))
+                )),
+                fld('Beskrivelse', h('textarea', { name: 'description', rows: '3', className: iCls + ' resize-y' }, task.description || ''))
+            ),
+            h('div', { className: 'flex gap-2 mt-5' },
+                h('button', { type: 'submit', className: 'bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 text-sm font-medium' }, 'Gem \u00e6ndringer'),
+                h('button', { type: 'button', className: 'bg-white border border-gray-300 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-50 text-sm', onClick: () => renderView() }, 'Annuller')
+            )
+        );
+        container.appendChild(form);
+
+        renderActivityLog(container, notes, history,
+            async (content) => { await api.createTaskNote(id, { content }); router(); },
+            async (noteId, content) => { await api.updateTaskNote(noteId, { content }); router(); }
+        );
+    }
+
+    renderView();
 }
 
 async function renderTasks(container) {

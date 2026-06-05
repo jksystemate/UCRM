@@ -125,6 +125,11 @@ export const api = {
     // Tags
     updateTag: (id, data) => request(`/tags/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
 
+    // Company notes
+    getCompanyNotes: (id) => request(`/companies/${id}/notes`),
+    createCompanyNote: (id, data) => request(`/companies/${id}/notes`, { method: 'POST', body: JSON.stringify(data) }),
+    updateCompanyNote: (id, data) => request(`/company-notes/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+
     // Tender notes
     getTenderNotes: (id) => request(`/tenders/${id}/notes`),
     createTenderNote: (id, data) => request(`/tenders/${id}/notes`, { method: 'POST', body: JSON.stringify(data) }),

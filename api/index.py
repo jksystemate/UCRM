@@ -275,6 +275,15 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )""",
             "CREATE INDEX IF NOT EXISTS idx_section_audit ON tender_section_audit(section_id)",
+            """CREATE TABLE IF NOT EXISTS company_notes (
+                id SERIAL PRIMARY KEY,
+                company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+                user_id INTEGER REFERENCES users(id),
+                user_name TEXT,
+                content TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_company_notes_company ON company_notes(company_id)",
             """CREATE TABLE IF NOT EXISTS task_notes (
                 id SERIAL PRIMARY KEY,
                 task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -1038,12 +1047,15 @@ class handler(BaseHTTPRequestHandler):
                     """SELECT t.*, u.name AS responsible_name
                        FROM tenders t LEFT JOIN users u ON t.responsible_id = u.id
                        WHERE t.company_id = %s ORDER BY t.created_at DESC""", (cid,)).fetchall()]
+                company_notes = [dict(r) for r in db.execute(
+                    "SELECT * FROM company_notes WHERE company_id = %s ORDER BY created_at DESC", (cid,)).fetchall()]
                 self._json_response({
                     "company": dict(company), "contacts": contacts, "score": score,
                     "interactions": interactions, "emails": emails, "users": users,
                     "tasks": tasks, "audit_log": audit,
                     "linkedin_activities": li_activities, "linkedin_engagements": li_engagements,
-                    "company_tags": company_tags, "all_tags": all_tags, "tenders": tenders
+                    "company_tags": company_tags, "all_tags": all_tags, "tenders": tenders,
+                    "company_notes": company_notes
                 })
 
             elif path.startswith("/api/companies/") and path.count("/") == 3:
@@ -1170,6 +1182,11 @@ class handler(BaseHTTPRequestHandler):
                 tid = int(path.split("/")[-2])
                 self._json_response([dict(r) for r in db.execute(
                     "SELECT * FROM task_notes WHERE task_id = %s ORDER BY created_at DESC", (tid,)).fetchall()])
+
+            elif path.startswith("/api/companies/") and path.endswith("/notes") and path.count("/") == 4:
+                cid = int(path.split("/")[-2])
+                self._json_response([dict(r) for r in db.execute(
+                    "SELECT * FROM company_notes WHERE company_id = %s ORDER BY created_at DESC", (cid,)).fetchall()])
 
             elif path.startswith("/api/tasks/") and path.endswith("/history"):
                 tid = int(path.split("/")[-2])
@@ -1668,6 +1685,22 @@ class handler(BaseHTTPRequestHandler):
                 db.commit()
                 self._json_response(dict(row), 201)
 
+            elif path.startswith("/api/companies/") and path.endswith("/notes") and path.count("/") == 4:
+                cid = int(path.split("/")[-2])
+                user_name = None
+                if uid:
+                    ur = db.execute("SELECT name FROM users WHERE id=%s", (uid,)).fetchone()
+                    if ur: user_name = ur["name"]
+                cur = db.execute(
+                    "INSERT INTO company_notes (company_id,user_id,user_name,content) VALUES (%s,%s,%s,%s) RETURNING id",
+                    (cid, uid, user_name, body.get("content","")))
+                new_id = cur.fetchone()["id"]
+                db.commit()
+                log_audit(db, uid, "add_note", "company", cid, body.get("content","")[:80])
+                db.commit()
+                row = db.execute("SELECT * FROM company_notes WHERE id = %s", (new_id,)).fetchone()
+                self._json_response(dict(row), 201)
+
             elif path.startswith("/api/tasks/") and path.endswith("/notes"):
                 tid = int(path.split("/")[-2])
                 user_name = None
@@ -2093,6 +2126,13 @@ class handler(BaseHTTPRequestHandler):
                 db.execute("UPDATE notifications SET is_read = TRUE WHERE is_read = FALSE")
                 db.commit()
                 self._json_response({"ok": True})
+
+            elif path.startswith("/api/company-notes/") and path.count("/") == 3:
+                nid = int(path.split("/")[-1])
+                db.execute("UPDATE company_notes SET content = %s WHERE id = %s", (body.get("content",""), nid))
+                db.commit()
+                row = db.execute("SELECT * FROM company_notes WHERE id = %s", (nid,)).fetchone()
+                self._json_response(dict(row))
 
             elif path.startswith("/api/task-notes/") and path.count("/") == 3:
                 nid = int(path.split("/")[-1])

@@ -1998,6 +1998,13 @@ async function renderCompanyDetail(container, id) {
     }
 
     columns.appendChild(rightCol);
+
+    // ─── Company Notes ───
+    const companyNotes = data.company_notes || [];
+    renderActivityLog(container, companyNotes, [],
+        async (content) => { await api.createCompanyNote(id, { content }); router(); },
+        async (noteId, content) => { await api.updateCompanyNote(noteId, { content }); router(); }
+    );
 }
 
 function scoreDetail(label, value, sub) {

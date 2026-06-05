@@ -660,19 +660,37 @@ def calculate_company_score(company_id):
         empty_sub = {"kontaktfrekvens": 0, "kontaktdaekning": 0, "tidsforfald": 0,
                      "linkedin": 0, "kendskab_behov": 0, "workshops": 0, "marketing": 0}
 
-        if not contact_ids:
+        TASK_TYPE_MAP = {
+            'moede': 'meeting', 'opkald': 'phone', 'demo': 'meeting',
+            'kontrakt': 'meeting_task', 'opfølgning': 'phone',
+            'tilbud': 'email', 'generelt': 'email',
+        }
+
+        interactions = [dict(r) for r in db.execute("""
+            SELECT type, date, contact_id FROM interactions
+            WHERE contact_id = ANY(%s) OR company_id = %s
+            UNION ALL
+            SELECT
+                CASE category
+                    WHEN 'moede' THEN 'meeting' WHEN 'opkald' THEN 'phone'
+                    WHEN 'demo' THEN 'meeting' WHEN 'kontrakt' THEN 'meeting_task'
+                    WHEN 'opfølgning' THEN 'phone' ELSE 'email'
+                END AS type,
+                COALESCE(due_date, created_at::date) AS date,
+                contact_id
+            FROM tasks WHERE company_id = %s
+            ORDER BY date DESC""",
+            (contact_ids, company_id, company_id)).fetchall()]
+
+        if not interactions:
             return {"company_id": company["id"], "company_name": company["name"],
                     "sector": company["sector"], "tier": company.get("tier"),
                     "rating": company.get("rating", "C"), "account_manager_name": am_name,
                     "score": 0, "sub_scores": empty_sub, "interaction_points": 0,
-                    "decay_factor": 0.10, "days_since_last": None, "total_contacts": 0,
+                    "decay_factor": 0.10, "days_since_last": None, "total_contacts": total_contacts,
                     "contacted_count": 0, "total_interactions": 0, "channel_types": [],
                     "level": "kold", "coverage_pct": 0, "li_connected": 0,
                     "score_color": "roed", **mx}
-
-        interactions = [dict(r) for r in db.execute(
-            "SELECT type, date, contact_id FROM interactions WHERE contact_id = ANY(%s) ORDER BY date DESC",
-            (contact_ids,)).fetchall()]
 
         decay_penalty_rules = [dict(r) for r in db.execute(
             "SELECT * FROM score_decay_rules WHERE is_active = TRUE ORDER BY inactivity_days").fetchall()]
@@ -731,10 +749,22 @@ def calculate_all_scores(db):
         tags_by_company[cid].append({"id": r["id"], "name": r["name"], "color": r["color"]})
 
     interactions_by_company = {}
-    for r in db.execute(
-            """SELECT i.type, i.date, i.contact_id, c.company_id
-               FROM interactions i JOIN contacts c ON i.contact_id = c.id
-               ORDER BY i.date DESC""").fetchall():
+    for r in db.execute("""
+            SELECT i.type, i.date, i.contact_id, COALESCE(c.company_id, i.company_id) AS company_id
+            FROM interactions i
+            LEFT JOIN contacts c ON i.contact_id = c.id
+            WHERE COALESCE(c.company_id, i.company_id) IS NOT NULL
+            UNION ALL
+            SELECT
+                CASE t.category
+                    WHEN 'moede' THEN 'meeting' WHEN 'opkald' THEN 'phone'
+                    WHEN 'demo' THEN 'meeting' WHEN 'kontrakt' THEN 'meeting_task'
+                    WHEN 'opfølgning' THEN 'phone' ELSE 'email'
+                END AS type,
+                COALESCE(t.due_date, t.created_at::date) AS date,
+                t.contact_id, t.company_id
+            FROM tasks t WHERE t.company_id IS NOT NULL
+            ORDER BY date DESC""").fetchall():
         cid = r["company_id"]
         if cid not in interactions_by_company:
             interactions_by_company[cid] = []
@@ -755,7 +785,7 @@ def calculate_all_scores(db):
             "score_workshops": company.get("score_workshops", 0) or 0,
             "score_marketing": company.get("score_marketing", 0) or 0,
         }
-        if total_contacts == 0 or not interactions:
+        if not interactions:
             results.append({
                 "company_id": cid, "company_name": company["name"], "sector": company["sector"],
                 "tier": company.get("tier"), "rating": company.get("rating", "C"),

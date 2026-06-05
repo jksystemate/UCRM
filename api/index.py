@@ -1381,8 +1381,22 @@ class handler(BaseHTTPRequestHandler):
                     ORDER BY t.deadline ASC NULLS LAST
                 """).fetchall()]
 
+                active_tasks = [dict(r) for r in db.execute("""
+                    SELECT t.id, t.title, t.category, t.status, t.priority, t.due_date,
+                           co.id AS company_id, co.name AS company_name,
+                           u.name AS assigned_to_name
+                    FROM tasks t JOIN companies co ON t.company_id = co.id
+                    LEFT JOIN users u ON t.assigned_to = u.id
+                    WHERE t.status != 'done'
+                    ORDER BY
+                        CASE t.priority WHEN 'high' THEN 1 WHEN 'normal' THEN 2 WHEN 'low' THEN 3 ELSE 4 END,
+                        t.due_date ASC NULLS LAST,
+                        t.id DESC
+                """).fetchall()]
+
                 self._json_response({"scores": scores, "stats": stats, "all_tags": all_tags,
-                                     "recent_activities": recent_activities, "active_tenders": active_tenders})
+                                     "recent_activities": recent_activities, "active_tenders": active_tenders,
+                                     "active_tasks": active_tasks})
 
             elif path == "/api/dashboard/scores":
                 scores = calculate_all_scores(db)

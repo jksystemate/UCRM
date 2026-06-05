@@ -721,6 +721,51 @@ async function renderDashboard(container) {
         container.appendChild(tenderSection);
     }
 
+    // ─── Active Tasks ───
+    const activeTasks = dashData.active_tasks || [];
+    if (activeTasks.length > 0) {
+        const PRIORITY_COLORS = { high: 'bg-red-100 text-red-700', normal: 'bg-blue-50 text-blue-700', low: 'bg-gray-100 text-gray-500' };
+        const PRIORITY_LABELS = { high: 'Høj', normal: 'Normal', low: 'Lav' };
+        const TASK_STATUS_COLORS = { open: 'bg-gray-100 text-gray-600', in_progress: 'bg-blue-100 text-blue-700' };
+
+        const taskSection = h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-8' },
+            h('div', { className: 'flex items-center justify-between mb-4' },
+                h('div', { className: 'flex items-center gap-3' },
+                    h('h2', { className: 'text-lg font-bold text-gray-900' }, 'Igangværende sager'),
+                    h('span', { className: 'text-sm text-gray-400' }, `${activeTasks.length} aktive`)
+                ),
+                h('a', { href: '#/tasks', className: 'text-sm text-blue-600 hover:underline' }, 'Se alle')
+            )
+        );
+        const taskGrid = h('div', { className: 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3' });
+        for (const t of activeTasks) {
+            const today = new Date().toISOString().split('T')[0];
+            const isOverdue = t.due_date && t.due_date < today;
+            const daysLeft = t.due_date ? Math.ceil((new Date(t.due_date) - new Date()) / 86400000) : null;
+            taskGrid.appendChild(h('a', { href: `#/tasks/${t.id}`, className: 'block border border-gray-200 rounded-lg p-4 hover:border-blue-300 hover:shadow-sm transition-all' },
+                h('div', { className: 'flex items-start justify-between gap-2 mb-1' },
+                    h('div', { className: 'font-medium text-gray-900 text-sm flex-1 truncate' }, t.title),
+                    t.priority === 'high' ? h('span', { className: 'inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700 flex-shrink-0' }, '↑ Høj') : null
+                ),
+                h('div', { className: 'flex items-center gap-2 mb-2' },
+                    h('span', { className: 'text-xs text-gray-500' }, t.company_name),
+                ),
+                h('div', { className: 'flex items-center justify-between text-xs' },
+                    h('div', { className: 'flex items-center gap-2' },
+                        h('span', { className: `badge badge-${t.category}` }, CATEGORY_LABELS[t.category] || t.category),
+                        h('span', { className: `inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${TASK_STATUS_COLORS[t.status] || 'bg-gray-100 text-gray-600'}` }, STATUS_LABELS[t.status] || t.status)
+                    ),
+                    t.due_date ? h('span', { className: isOverdue ? 'text-red-500 font-medium' : daysLeft <= 3 ? 'text-orange-500' : 'text-gray-400' },
+                        isOverdue ? `${Math.abs(daysLeft)}d overskredet` : daysLeft === 0 ? 'I dag' : `${daysLeft}d`
+                    ) : null
+                ),
+                t.assigned_to_name ? h('div', { className: 'text-xs text-gray-400 mt-2' }, t.assigned_to_name) : null
+            ));
+        }
+        taskSection.appendChild(taskGrid);
+        container.appendChild(taskSection);
+    }
+
     // Recent Activity Feed — interactive period selector
     let _activityDays = 14;
     let _activityFromDate = null;

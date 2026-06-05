@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta
 
 import psycopg2
 import psycopg2.extras
+from decimal import Decimal
 
 # ─── DB wrapper ───
 class DB:
@@ -40,6 +41,8 @@ def get_db():
 def _json_default(obj):
     if isinstance(obj, (date, datetime)):
         return obj.isoformat()
+    if isinstance(obj, Decimal):
+        return float(obj)
     raise TypeError(f"Type {type(obj)} not serializable")
 
 # ─── Database init ───

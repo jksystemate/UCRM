@@ -687,6 +687,7 @@ async function renderDashboard(container) {
                 h('a', { href: '#/tenders', className: 'text-sm text-blue-600 hover:underline' }, 'Se alle')
             )
         );
+        const tenderScroll = h('div', { className: 'overflow-y-auto', style: 'max-height:320px' });
         const tenderGrid = h('div', { className: 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3' });
         for (const t of activeTenders) {
             const progress = t.total_sections > 0 ? Math.round(t.approved_sections / t.total_sections * 100) : 0;
@@ -717,7 +718,8 @@ async function renderDashboard(container) {
                 )
             ));
         }
-        tenderSection.appendChild(tenderGrid);
+        tenderScroll.appendChild(tenderGrid);
+        tenderSection.appendChild(tenderScroll);
         container.appendChild(tenderSection);
     }
 
@@ -737,6 +739,7 @@ async function renderDashboard(container) {
                 h('a', { href: '#/tasks', className: 'text-sm text-blue-600 hover:underline' }, 'Se alle')
             )
         );
+        const taskScroll = h('div', { className: 'overflow-y-auto', style: 'max-height:400px' });
         const taskGrid = h('div', { className: 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3' });
         for (const t of activeTasks) {
             const today = new Date().toISOString().split('T')[0];
@@ -762,7 +765,8 @@ async function renderDashboard(container) {
                 t.assigned_to_name ? h('div', { className: 'text-xs text-gray-400 mt-2' }, t.assigned_to_name) : null
             ));
         }
-        taskSection.appendChild(taskGrid);
+        taskScroll.appendChild(taskGrid);
+        taskSection.appendChild(taskScroll);
         container.appendChild(taskSection);
     }
 

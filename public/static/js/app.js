@@ -3336,12 +3336,12 @@ async function renderTasks(container) {
                             await api.updateTask(t.id, { status: newStatus }); router();
                         }
                     }, t.status === 'done' ? h('span', { className: 'text-white text-xs flex items-center justify-center', innerHTML: '\u2713' }) : null),
-                    h('div', { className: 'flex-1' },
+                    h('div', { className: 'flex-1 min-w-0' },
                         h('div', { className: `font-medium ${t.status === 'done' ? 'text-gray-400 line-through' : 'text-gray-900'}` }, t.title),
+                        t.company_name ? h('a', { href: `#/companies/${t.company_id}`, className: 'text-sm font-medium text-blue-700 hover:underline block mt-0.5', onClick: e => e.stopPropagation() }, t.company_name) : null,
                         h('div', { className: 'flex flex-wrap gap-2 mt-1' },
                             h('span', { className: `badge badge-${t.category}` }, CATEGORY_LABELS[t.category] || t.category),
                             h('span', { className: `text-xs ${PRIORITY_LABELS[t.priority] ? 'priority-' + t.priority : ''}` }, PRIORITY_LABELS[t.priority] || t.priority),
-                            t.company_name ? h('a', { href: `#/companies/${t.company_id}`, className: 'text-xs text-blue-600 hover:underline', onClick: e => e.stopPropagation() }, t.company_name) : null,
                             t.assigned_to_name ? h('span', { className: 'text-xs text-gray-500' }, t.assigned_to_name) : null,
                         )
                     ),

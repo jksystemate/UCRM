@@ -610,8 +610,9 @@ def init_db():
             except Exception:
                 db.rollback()
 
-        # Seed: Jess user
-        db.execute("INSERT INTO users (name, email, role) VALUES ('Jess Kristensen', 'jess@systemate.dk', 'admin') ON CONFLICT (email) DO NOTHING")
+        # Seed: Jess user, kun i en helt tom database (ellers kommer brugeren igen, hvis e-mailen er rettet)
+        db.execute("""INSERT INTO users (name, email, role) SELECT 'Jess Kristensen', 'jess@systemate.dk', 'admin'
+                      WHERE NOT EXISTS (SELECT 1 FROM users)""")
         db.commit()
 
         # Seed companies if empty
@@ -624,12 +625,14 @@ def init_db():
                    (DEFAULT_SALES_PROCESS,))
         db.commit()
 
-        # Seed: CEO-mål fra brugerens egne eksempler, kun første gang
-        if db.execute("SELECT COUNT(*) AS cnt FROM goals").fetchone()["cnt"] == 0:
-            for g in SEED_GOALS:
-                db.execute(
-                    """INSERT INTO goals (area,kind,title,description,owner_role,unit,start_value,target_value,
-                       current_value,start_date,due_date) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", g)
+        # Seed: CEO-mål fra brugerens egne eksempler, kun første gang (flaget gør, at slettede mål ikke kommer igen)
+        if not db.execute("SELECT 1 FROM app_settings WHERE key = 'goals_seeded'").fetchone():
+            if db.execute("SELECT COUNT(*) AS cnt FROM goals").fetchone()["cnt"] == 0:
+                for g in SEED_GOALS:
+                    db.execute(
+                        """INSERT INTO goals (area,kind,title,description,owner_role,unit,start_value,target_value,
+                           current_value,start_date,due_date) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", g)
+            db.execute("INSERT INTO app_settings (key, value) VALUES ('goals_seeded', 'true') ON CONFLICT (key) DO NOTHING")
             db.commit()
 
     finally:

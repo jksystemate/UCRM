@@ -149,6 +149,7 @@ export const api = {
     },
     getNotificationCount: () => request('/notifications/count'),
     markNotificationRead: (id) => request(`/notifications/${id}/read`, { method: 'PUT' }),
+    clearReadNotifications: () => request('/notifications/read', { method: 'DELETE' }),
     markAllNotificationsRead: () => request('/notifications/read-all', { method: 'PUT' }),
     checkNotifications: () => request('/notifications/check'),
 
@@ -260,7 +261,8 @@ export const api = {
     getAssistant: () => request('/ceo/assistant'),
     snoozeAssistant: (id, days = 7) => request('/ceo/assistant/snooze', { method: 'POST', body: JSON.stringify({ id, days }) }),
     clearAssistantSnoozes: () => request('/ceo/assistant/snooze', { method: 'POST', body: JSON.stringify({ clear: true }) }),
-    askAssistant: (question, history = []) => request('/ceo/assistant/ask', { method: 'POST', body: JSON.stringify({ question, history }) }),
+    askAssistant: (question, history = [], mode = null) => request('/ceo/assistant/ask', { method: 'POST', body: JSON.stringify({ question, history, mode }) }),
+    getLeadershipMirror: () => request('/ceo/assistant/mirror'),
     // Indkøbsfællesskaber
     getPurchasingGroups: () => request('/purchasing-groups'),
     setPurchasingGroup: (companyId, isGroup) => request(`/companies/${companyId}/group`, { method: 'PUT', body: JSON.stringify({ is_purchasing_group: isGroup }) }),
@@ -272,6 +274,8 @@ export const api = {
     addReportItem: (id, data) => request(`/report-rounds/${id}/items`, { method: 'POST', body: JSON.stringify(data) }),
     updateReportItem: (id, itemId, data) => request(`/report-rounds/${id}/items/${itemId}`, { method: 'PUT', body: JSON.stringify(data) }),
     deleteReportItem: (id, itemId) => request(`/report-rounds/${id}/items/${itemId}`, { method: 'DELETE' }),
+    suggestReportQuestions: (id) => request(`/report-rounds/${id}/suggest-questions`, { method: 'POST' }),
+    createFollowupRound: (id, data) => request(`/report-rounds/${id}/followup-round`, { method: 'POST', body: JSON.stringify(data) }),
     applyReportSuggestion: (id, suggestionId) => request(`/report-rounds/${id}/apply-suggestion`, { method: 'POST', body: JSON.stringify({ id: suggestionId }) }),
 };
 

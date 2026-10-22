@@ -92,6 +92,7 @@ SALES_PHASES = [["indledende", "Indledende møder"], ["demo", "Demo"], ["afklari
 PHASE_TO_STAGE = {"indledende": "tidlig_fase", "demo": "aktiv_dialog", "afklaring": "aktiv_dialog",
                   "tilbud": "fremskreden", "forhandling": "fremskreden", "kontrakt": "fremskreden"}
 MAX_DETAILED_CUSTOMERS = 12
+AREA_NAMES = [("salg", "salg & marketing"), ("leverance", "leverance"), ("oekonomi", "økonomi"), ("tvaers", "tværgående")]
 
 # Svarform: det skal være så let som muligt at svare
 ANSWER_FORMAT_RULES = (
@@ -548,6 +549,19 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS idx_report_items_round ON report_items(round_id)",
             "ALTER TABLE report_rounds ADD COLUMN IF NOT EXISTS practice BOOLEAN DEFAULT FALSE",
             "ALTER TABLE report_rounds ADD COLUMN IF NOT EXISTS ai_questions BOOLEAN DEFAULT FALSE",
+            "ALTER TABLE report_rounds ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMP",
+            "ALTER TABLE report_rounds ADD COLUMN IF NOT EXISTS followup_of INTEGER REFERENCES report_rounds(id) ON DELETE CASCADE",
+            # Notifikationer kan også pege på andet end en virksomhed (fx en indsendt indrapportering)
+            "ALTER TABLE notifications ALTER COLUMN company_id DROP NOT NULL",
+            "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS title TEXT",
+            "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS link TEXT",
+            # Husker om en kunde allerede står under scoregrænsen, så der kun notificeres ved ændringer
+            """CREATE TABLE IF NOT EXISTS score_alert_state (
+                company_id INTEGER PRIMARY KEY REFERENCES companies(id) ON DELETE CASCADE,
+                below BOOLEAN NOT NULL,
+                last_score NUMERIC,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
             # Indkøbsfællesskaber (fx Servia): en virksomhed kan være et fællesskab, kunder kan være medlemmer,
             # og et tilbud kan gå direkte til kunden eller via fællesskabet
             "ALTER TABLE companies ADD COLUMN IF NOT EXISTS is_purchasing_group BOOLEAN DEFAULT FALSE",
@@ -754,25 +768,47 @@ def log_audit(db, user_id, action, entity_type, entity_id, entity_name, details=
 
 
 # ─── Notification check ───
+SCORE_DROP_POINTS = 15  # så meget skal scoren falde, før der notificeres igen for en kunde under grænsen
+
+
 def check_score_notifications(db):
-    thresholds = {}
-    for row in db.execute("SELECT rating, threshold FROM score_settings").fetchall():
-        thresholds[row["rating"]] = row["threshold"]
-    all_scores = calculate_all_scores(db)
-    for s in all_scores:
-        rating = s.get("rating") or "C"
-        threshold = thresholds.get(rating, 30)
-        if s["score"] < threshold:
-            existing = db.execute(
-                """SELECT id FROM notifications WHERE company_id = %s AND is_read = FALSE
-                   AND created_at > NOW() - INTERVAL '7 days' AND type = 'score_drop'""",
-                (s["company_id"],)).fetchone()
-            if not existing:
-                msg = "{} har score {} (under graense {} for {}-kunde)".format(
-                    s["company_name"], round(s["score"]), threshold, rating)
-                db.execute(
-                    "INSERT INTO notifications (company_id, type, message) VALUES (%s, 'score_drop', %s)",
-                    (s["company_id"], msg))
+    """Notificerer kun ved ændringer: når en kunde falder under sin scoregrænse, eller scoren falder markant.
+    Kunder der allerede står under grænsen giver ikke nye notifikationer, heller ikke efter de er læst."""
+    thresholds = {row["rating"]: row["threshold"] for row in db.execute("SELECT rating, threshold FROM score_settings").fetchall()}
+    state = {r["company_id"]: r for r in db.execute("SELECT * FROM score_alert_state").fetchall()}
+    first_run = not state
+    # Engangsoprydning efter den gamle logik, der lavede en notifikation pr. kunde under grænsen igen og igen.
+    # Styres af et flag (ikke af first_run), så den også virker, hvis den gamle version nåede at lave dem igen.
+    done = db.execute("SELECT value FROM app_settings WHERE key = 'score_notif_cleanup_v2'").fetchone()
+    if not done:
+        db.execute("UPDATE notifications SET is_read = TRUE WHERE type = 'score_drop' AND is_read = FALSE AND title IS NULL")
+        db.execute("INSERT INTO app_settings (key, value) VALUES ('score_notif_cleanup_v2', %s) ON CONFLICT (key) DO NOTHING",
+                   (date.today().isoformat(),))
+    changed = []
+    for s in calculate_all_scores(db):
+        cid = s["company_id"]
+        threshold = thresholds.get(s.get("rating") or "C", 30)
+        below = s["score"] < threshold
+        prev = state.get(cid)
+        if prev is not None and not first_run:
+            if below and not prev["below"]:
+                changed.append((s, threshold, "under"))
+            elif below and prev["last_score"] is not None and float(prev["last_score"]) - s["score"] >= SCORE_DROP_POINTS:
+                changed.append((s, threshold, "fald"))
+        if prev is None or prev["below"] != below or (prev["last_score"] is None) or abs(float(prev["last_score"]) - s["score"]) >= 1:
+            db.execute("""INSERT INTO score_alert_state (company_id, below, last_score, updated_at) VALUES (%s,%s,%s,CURRENT_TIMESTAMP)
+                          ON CONFLICT (company_id) DO UPDATE SET below = EXCLUDED.below, last_score = EXCLUDED.last_score,
+                          updated_at = CURRENT_TIMESTAMP""", (cid, below, s["score"]))
+    if len(changed) > 5:
+        names = ", ".join(c[0]["company_name"] for c in changed[:6])
+        db.execute("""INSERT INTO notifications (company_id, type, title, message, link) VALUES (NULL, 'score_drop', %s, %s, '#/companies')""",
+                   (f"{len(changed)} kunder er faldet i relationsscore", f"Bl.a. {names}. Se virksomhederne og planlæg kontakt."))
+    else:
+        for s, threshold, why in changed:
+            rating = s.get("rating") or "C"
+            msg = (f"Scoren er faldet til {round(s['score'])}, under grænsen {threshold} for {rating}-kunder." if why == "under"
+                   else f"Scoren er faldet med mere end {SCORE_DROP_POINTS} point til {round(s['score'])}.")
+            db.execute("INSERT INTO notifications (company_id, type, message) VALUES (%s, 'score_drop', %s)", (s["company_id"], msg))
     db.commit()
 
 
@@ -1474,12 +1510,13 @@ class handler(BaseHTTPRequestHandler):
                 self._json_response([dict(r) for r in db.execute(q, p).fetchall()])
 
             elif path == "/api/notifications":
-                q = "SELECT n.*, c.name AS company_name FROM notifications n JOIN companies c ON n.company_id = c.id WHERE 1=1"
+                q = "SELECT n.*, COALESCE(n.title, c.name) AS company_name FROM notifications n LEFT JOIN companies c ON n.company_id = c.id WHERE 1=1"
                 p = []
                 if "is_read" in params:
                     val = params["is_read"][0]
                     q += " AND n.is_read = %s"; p.append(val == "1" or val == "true")
-                q += " ORDER BY n.created_at DESC LIMIT 50"
+                # Ulæste svar fra ledere står altid øverst, så de ikke drukner i score-notifikationer
+                q += " ORDER BY n.is_read ASC, (n.type = 'report') DESC, n.created_at DESC LIMIT 50"
                 self._json_response([dict(r) for r in db.execute(q, p or None).fetchall()])
 
             elif path == "/api/notifications/count":
@@ -2558,6 +2595,11 @@ class handler(BaseHTTPRequestHandler):
         try:
             if self._handle_ceo(db, 'DELETE', path, {}, None, uid):
                 return
+            if path == "/api/notifications/read":
+                # "Ryd læste" i klokken: fjerner notifikationer, brugeren allerede har læst
+                db.execute("DELETE FROM notifications WHERE is_read = TRUE")
+                db.commit()
+                return self._no_content()
             if path.startswith("/api/companies/") and path.count("/") == 3:
                 cid = int(path.split("/")[-1])
                 row = db.execute("SELECT name FROM companies WHERE id = %s", (cid,)).fetchone()
@@ -3061,7 +3103,12 @@ class handler(BaseHTTPRequestHandler):
             if r["due_date"] and str(r["due_date"])[:10] < iso:
                 add(f"report-late-{r['id']}", "vigtig", r["area"], f"{r['respondent_name']} har ikke indsendt indrapporteringen",
                     f"Svarfristen var {r['due_date']}.", "Send en påmindelse", f"#/reports/{r['id']}")
-        for r in db.execute("SELECT id FROM report_rounds WHERE status = 'answered' AND NOT practice ORDER BY submitted_at DESC LIMIT 5").fetchall():
+        for r in db.execute("""SELECT id, area, respondent_name, practice, followup_of FROM report_rounds
+                               WHERE status = 'answered' AND reviewed_at IS NULL ORDER BY submitted_at DESC""").fetchall():
+            add(f"report-new-{r['id']}", "vigtig", r["area"],
+                f"{r['respondent_name']} har svaret" + (" på dine opfølgende spørgsmål" if r["followup_of"] else "") + (" (øvelse)" if r["practice"] else ""),
+                "Svarene er klar til gennemsyn.", "Gennemse svarene", f"#/reports/{r['followup_of'] or r['id']}")
+        for r in db.execute("SELECT id FROM report_rounds WHERE status = 'answered' AND NOT practice AND followup_of IS NULL ORDER BY submitted_at DESC LIMIT 5").fetchall():
             rnd = self._round_full(db, r["id"])
             sug = self._cleanup_suggestions(db, rnd)
             if sug:
@@ -3101,6 +3148,124 @@ class handler(BaseHTTPRequestHandler):
         active.sort(key=lambda x: order[x["severity"]])
         return active, len(out) - len(active)
 
+    def _leadership_mirror(self, db):
+        """Lederspejl: hvordan CEO'en faktisk leder ud fra møder, aktioner, mål og indrapporteringer."""
+        today = date.today()
+        d30, d90 = (today - timedelta(days=30)).isoformat(), (today - timedelta(days=90)).isoformat()
+        areas = {"salg": "Salg & marketing", "leverance": "Leverance", "oekonomi": "Økonomi"}
+        role = {"salg": "CCO", "leverance": "COO", "oekonomi": "CFO"}
+        m = {}
+        # Møder
+        held = {a: db.execute("SELECT COUNT(*) AS n, MAX(meeting_date) AS last FROM meetings WHERE area = %s AND status = 'done' AND meeting_date >= %s",
+                              (a, d90)).fetchone() for a in list(areas) + ["tvaers"]}
+        m["meetings_90"] = {a: held[a]["n"] for a in held}
+        m["last_meeting"] = {a: (str(held[a]["last"]) if held[a]["last"] else None) for a in held}
+        done_meetings = [dict(r) for r in db.execute("SELECT id, area, notes FROM meetings WHERE status = 'done' AND meeting_date >= %s", (d90,)).fetchall()]
+        incomplete = 0
+        for mt in done_meetings:
+            goals_n = db.execute("SELECT COUNT(*) AS n FROM goals WHERE NOT archived AND (area = %s OR (%s = 'tvaers' AND kind = 'strategisk'))",
+                                 (mt["area"], mt["area"])).fetchone()["n"]
+            checked = db.execute("SELECT COUNT(DISTINCT goal_id) AS n FROM goal_checkins WHERE meeting_id = %s", (mt["id"],)).fetchone()["n"]
+            if goals_n and checked < goals_n:
+                incomplete += 1
+        m["meetings_done_90"] = len(done_meetings)
+        m["meetings_incomplete"] = incomplete
+        m["decisions_90"] = db.execute("""SELECT COUNT(*) AS n FROM meeting_actions a JOIN meetings mt ON a.meeting_id = mt.id
+                                          WHERE a.kind = 'beslutning' AND mt.meeting_date >= %s""", (d90,)).fetchone()["n"]
+        # Aktioner
+        acts = [dict(r) for r in db.execute("""SELECT id, owner, due_date, status, done_at, created_at FROM meeting_actions
+                                               WHERE kind = 'aktion' AND created_at >= %s""", (d90,)).fetchall()]
+        due_passed = [a for a in acts if a["due_date"] and str(a["due_date"]) < today.isoformat()]
+        on_time = [a for a in due_passed if a["status"] == "done" and a["done_at"] and a["done_at"].date() <= a["due_date"]]
+        m["actions_90"] = len(acts)
+        m["actions_due_passed"] = len(due_passed)
+        m["actions_on_time_pct"] = round(len(on_time) / len(due_passed) * 100) if due_passed else None
+        carried = {}
+        for mt in done_meetings + [dict(r) for r in db.execute("SELECT id, area, notes FROM meetings WHERE status != 'done'").fetchall()]:
+            for aid in (mt.get("notes") or {}).get("carried") or []:
+                carried[aid] = carried.get(aid, 0) + 1
+        m["actions_pushed_twice"] = sum(1 for v in carried.values() if v >= 2)
+        ceo_open = [a for a in self._action_rows(db, "AND a.status = 'open' AND a.kind = 'aktion' AND a.owner ILIKE 'CEO%%'")]
+        m["ceo_actions_open"] = len(ceo_open)
+        m["ceo_actions_overdue"] = sum(1 for a in ceo_open if a.get("due_date") and str(a["due_date"])[:10] < today.isoformat())
+        m["ceo_actions_overdue_titles"] = [a["title"] for a in ceo_open if a.get("due_date") and str(a["due_date"])[:10] < today.isoformat()][:5]
+        # Mål
+        goals = self._goal_rows(db, "AND NOT g.archived AND g.status != 'done'")
+        m["goals"] = len(goals)
+        m["goals_updated_30"] = sum(1 for g in goals if g.get("last_checkin") and str(g["last_checkin"]) >= d30)
+        m["strategic_unmoved"] = [g["title"] for g in goals if g["kind"] == "strategisk" and not g.get("last_checkin")
+                                  and (g.get("current_value") in (None, g.get("start_value")))]
+        # Opmærksomhed pr. område (møder, statusopdateringer og aktioner de sidste 30 dage)
+        att = {}
+        for a in areas:
+            att[a] = (db.execute("SELECT COUNT(*) AS n FROM meetings WHERE area = %s AND meeting_date >= %s AND status != 'planned'", (a, d30)).fetchone()["n"] * 3
+                      + db.execute("""SELECT COUNT(*) AS n FROM goal_checkins c JOIN goals g ON c.goal_id = g.id
+                                      WHERE g.area = %s AND c.checkin_date >= %s""", (a, d30)).fetchone()["n"]
+                      + db.execute("SELECT COUNT(*) AS n FROM meeting_actions WHERE area = %s AND created_at >= %s", (a, d30)).fetchone()["n"]
+                      + db.execute("SELECT COUNT(*) AS n FROM report_rounds WHERE area = %s AND created_at >= %s", (a, d30)).fetchone()["n"] * 2)
+        total = sum(att.values())
+        m["attention_pct"] = {a: (round(v / total * 100) if total else 0) for a, v in att.items()}
+        # Indrapporteringer
+        m["reports_30"] = db.execute("SELECT COUNT(*) AS n FROM report_rounds WHERE created_at >= %s AND followup_of IS NULL AND NOT practice", (d30,)).fetchone()["n"]
+        m["reports_unreviewed_3d"] = db.execute("""SELECT COUNT(*) AS n FROM report_rounds WHERE status = 'answered' AND reviewed_at IS NULL
+                                                   AND submitted_at < NOW() - INTERVAL '3 days'""").fetchone()["n"]
+        m["followups_30"] = db.execute("SELECT COUNT(*) AS n FROM report_rounds WHERE followup_of IS NOT NULL AND created_at >= %s", (d30,)).fetchone()["n"]
+        snoozed = json.loads(self._setting(db, "assistant_snoozed", "{}") or "{}")
+        m["snoozed_now"] = sum(1 for v in snoozed.values() if v >= today.isoformat())
+
+        # Observationer: det gode og det, der kan blive bedre
+        obs = []
+        def o(kind, title, detail, href=None):
+            obs.append({"kind": kind, "title": title, "detail": detail, "href": href})
+        for a in areas:
+            last = m["last_meeting"][a]
+            if not last or last < d30:
+                o("udfordring", f"Du har ikke holdt møde med {role[a]} om {areas[a].lower()} i over 30 dage",
+                  "Uden faste møder er opfølgningen afhængig af, hvad der tilfældigvis kommer op." + (f" Sidste møde: {last}." if last else " Der er aldrig holdt et."), "#/meetings")
+        if total and max(m["attention_pct"].values()) >= 60:
+            top = max(m["attention_pct"], key=m["attention_pct"].get)
+            low = [areas[a] for a, v in m["attention_pct"].items() if v <= 15]
+            if low:
+                o("udfordring", f"Din opmærksomhed er skæv: {m['attention_pct'][top]} % går til {areas[top].lower()}",
+                  f"{', '.join(low)} får næsten ingen opfølgning. Er det et bevidst valg?")
+        if m["actions_on_time_pct"] is not None and m["actions_due_passed"] >= 4:
+            if m["actions_on_time_pct"] < 60:
+                o("udfordring", f"Kun {m['actions_on_time_pct']} % af aktionerne lukkes til tiden",
+                  "Overvej færre og skarpere aktioner med realistiske frister, og følg op på dem på hvert møde.")
+            elif m["actions_on_time_pct"] >= 80:
+                o("styrke", f"{m['actions_on_time_pct']} % af aktionerne lukkes til tiden", "Opfølgningen virker. Hold fast i rytmen.")
+        if m["actions_pushed_twice"]:
+            o("udfordring", f"{m['actions_pushed_twice']} aktioner er skubbet videre mindst to gange",
+              "Når en aktion bliver ved med at 'fortsætte', er den enten for stor, uklar eller ikke vigtig. Beslut hvilken.", "#/meetings")
+        if m["ceo_actions_overdue"]:
+            o("udfordring", f"Du er selv bagud på {m['ceo_actions_overdue']} aktion" + ("er" if m["ceo_actions_overdue"] > 1 else ""),
+              "Du sætter standarden for, hvordan der følges op. " + "; ".join(m["ceo_actions_overdue_titles"]))
+        elif m["actions_90"] >= 5 and not m["ceo_actions_open"] and not any((a.get("owner") or "").upper().startswith("CEO") for a in acts):
+            o("refleksion", "Du har ingen aktioner selv", "Alt er uddelegeret. Hvad er det, kun du kan gøre for at flytte målene?")
+        if m["goals"] and m["goals_updated_30"] / m["goals"] < 0.5:
+            o("udfordring", f"Kun {m['goals_updated_30']} af {m['goals']} mål er opdateret de sidste 30 dage",
+              "Mål, der ikke bliver fulgt op, bliver til ønsker. Brug ledermøderne til at opdatere dem.", "#/goals")
+        if m["strategic_unmoved"]:
+            o("udfordring", "Strategien flytter sig ikke", "Disse strategiske mål har ikke haft nogen statusopdatering: " + ", ".join(m["strategic_unmoved"][:3]) + ".", "#/goals")
+        if m["meetings_done_90"] and not m["decisions_90"]:
+            o("refleksion", "Dine møder registrerer ingen beslutninger", "Bliver der truffet beslutninger, som ikke bliver skrevet ned, eller bliver der ikke besluttet noget?")
+        if m["meetings_incomplete"]:
+            n = m['meetings_incomplete']
+            o("refleksion", f"{n} møde{'' if n == 1 else 'r'} er afsluttet, uden at alle mål blev opdateret", "Er dagsordenen for lang, eller springes målene over, når tiden er knap?")
+        if m["snoozed_now"] >= 5:
+            o("refleksion", f"Du har udsat {m['snoozed_now']} punkter hos assistenten", "Udsættelse er fint, men mange udsatte punkter kan være et tegn på, at noget skal uddelegeres eller droppes.")
+        if m["reports_unreviewed_3d"]:
+            o("udfordring", f"{m['reports_unreviewed_3d']} indrapporteringer har ligget ulæst i over 3 dage",
+              "Når svarene ikke bliver læst, mister lederne motivationen til at svare grundigt.")
+        if m["followups_30"]:
+            o("styrke", f"Du har stillet opfølgende spørgsmål {m['followups_30']} gang" + ("e" if m["followups_30"] > 1 else "") + " den sidste måned",
+              "Du går i dybden med svarene. Det skaber bedre indrapporteringer.")
+        if all(m["last_meeting"][a] and m["last_meeting"][a] >= d30 for a in areas):
+            o("styrke", "Du har holdt møde med alle tre ledere den sidste måned", "Rytmen er på plads.")
+        order = {"udfordring": 0, "refleksion": 1, "styrke": 2}
+        obs.sort(key=lambda x: order[x["kind"]])
+        return {"metrics": m, "observations": obs}
+
     def _assistant_snapshot(self, db, checks):
         """Kompakt billede af virksomheden til AI-rådgivning."""
         goals = [{"titel": g["title"], "område": g["area"], "type": g["kind"], "ansvarlig": g.get("owner_role"), "status": g["status"],
@@ -3123,6 +3288,8 @@ class handler(BaseHTTPRequestHandler):
             counts = {s: sum(1 for c in checks if c["severity"] == s) for s in ("kritisk", "vigtig", "tips")}
             self._json_response({"items": checks, "counts": counts, "snoozed": snoozed,
                                  "ai": bool(os.environ.get("ANTHROPIC_API_KEY"))})
+        elif path == "/api/ceo/assistant/mirror" and method == "GET":
+            self._json_response(self._leadership_mirror(db))
         elif path == "/api/ceo/assistant/snooze" and method == "POST":
             snoozed = json.loads(self._setting(db, "assistant_snoozed", "{}") or "{}")
             snoozed = {k: v for k, v in snoozed.items() if v >= date.today().isoformat()}
@@ -3139,6 +3306,15 @@ class handler(BaseHTTPRequestHandler):
                 self._error(400, "AI er ikke slået til endnu (ANTHROPIC_API_KEY mangler i Vercel)"); return True
             checks, _ = self._assistant_checks(db)
             snapshot = self._assistant_snapshot(db, checks)
+            if body.get("mode") == "coach":
+                snapshot["lederspejl"] = self._leadership_mirror(db)
+            coach = (
+                "\n\nDU ER LIGE NU I SPARRINGSTILSTAND: Udfordr CEO'en som en erfaren, direkte sparringspartner eller mentor. "
+                "Fokus er CEO'ens egen ledelse: rytme og konsekvens i opfølgningen, prioritering og fokus, delegering, "
+                "beslutningskraft, om de svære samtaler bliver taget, og hvad der er tabt af syne. Brug lederspejlet og data som belæg. "
+                "Vær ærlig og konkret, men respektfuld. Ingen floskler. Anerkend kort det, der virker. "
+                "Slut altid med '## Én ting til denne uge' med én konkret handling, og '## Spørgsmål til dig selv' med 2–3 skarpe spørgsmål."
+            ) if body.get("mode") == "coach" else ""
             system = (
                 "Du er CEO-assistent i SystemateCEO for CEO'en i Systemate (software til forsynings- og energiselskaber). "
                 "CEO'en følger op på tre områder med faste ledermøder: salg & marketing (CCO), leverance (COO) og økonomi (CFO), "
@@ -3147,7 +3323,7 @@ class handler(BaseHTTPRequestHandler):
                 "Regler: Svar på dansk, kort og handlingsorienteret. Nævn mål, kunder, aktioner og personer ved navn. "
                 "Prioritér: hvad er vigtigst først, og hvorfor. Foreslå konkrete næste skridt med hvem og hvornår. "
                 "Byg kun på data herunder. Gæt ikke, og sig det, hvis data mangler. Brug overskrifter (##) og punktlister.\n\n"
-                "Data (JSON):\n" + json.dumps(snapshot, ensure_ascii=False, default=_json_default))
+                "Data (JSON):\n" + json.dumps(snapshot, ensure_ascii=False, default=_json_default) + coach)
             history = [m for m in (body.get("history") or []) if m.get("role") in ("user", "assistant") and m.get("content")][-8:]
             question = (body.get("question") or "").strip() or "Hvad bør jeg fokusere på nu?"
             messages = history + [{"role": "user", "content": question}]
@@ -3207,7 +3383,7 @@ class handler(BaseHTTPRequestHandler):
         score += 1 if not ctx.get("last_contact") else 0
         return score
 
-    def _build_report_items(self, db, round_id, area, respondent_user_id=None):
+    def _build_report_items(self, db, round_id, area, respondent_user_id=None, company_ids=None, only_customers=False):
         """Laver indrapporteringen ud fra data. Bedste svarform først: hurtige klik-lister til det, alle kunder skal svare på,
         grundige spørgsmål kun til de vigtigste kunder, og emner der blev udskudt sidst kommer med igen."""
         items = []
@@ -3238,6 +3414,13 @@ class handler(BaseHTTPRequestHandler):
                     WHERE co.id IN (SELECT company_id FROM tasks WHERE status != 'done' AND area = 'leverance')
                        OR co.id IN (SELECT company_id FROM goals WHERE NOT archived AND area = 'leverance' AND company_id IS NOT NULL)
                     ORDER BY co.name LIMIT 40""").fetchall()
+            if company_ids:
+                # CEO'en har valgt bestemte kunder (fx til en kort runde eller en test)
+                wanted = {int(x) for x in company_ids}
+                companies = [c for c in companies if c["id"] in wanted] + [
+                    dict(r) for r in db.execute("""SELECT id, name, sales_stage, sales_type, sales_phase FROM companies
+                                                   WHERE id = ANY(%s)""", (list(wanted),)).fetchall()
+                    if r["id"] not in {c["id"] for c in companies}]
             for co in companies:
                 cid = co["id"]
                 tenders = [dict(r) for r in db.execute("""
@@ -3304,11 +3487,11 @@ class handler(BaseHTTPRequestHandler):
             for co, ctx in customers:
                 if co["id"] not in carried_companies:
                     items.append(("customer", "company", co["id"], co["id"], co["name"], ctx))
-        for g in self._goal_rows(db, "AND NOT g.archived AND g.area = %s", (area,)):
+        for g in ([] if only_customers else self._goal_rows(db, "AND NOT g.archived AND g.area = %s", (area,))):
             ctx = {k: g.get(k) for k in ("kind", "unit", "start_value", "target_value", "current_value", "due_date",
                                           "status", "last_checkin", "last_comment", "milestones_total", "milestones_done", "start_date")}
             items.append(("goal", "goal", g["id"], g.get("company_id"), g["title"], ctx))
-        for kind, title, ctx in REPORT_QUESTIONS.get(area, []):
+        for kind, title, ctx in ([] if only_customers else REPORT_QUESTIONS.get(area, [])):
             items.append((kind, None, None, None, title, ctx))
         for i, (kind, ref_type, ref_id, company_id, title, ctx) in enumerate(items):
             db.execute("""INSERT INTO report_items (round_id, kind, ref_type, ref_id, company_id, title, context, sort_order)
@@ -3495,6 +3678,66 @@ class handler(BaseHTTPRequestHandler):
                 suggestions.append({"id": f"{cid}:{outcome}", "company_id": cid, "company_name": co["name"],
                                     "outcome": outcome, "source": source, "actions": actions})
         return suggestions
+
+    @staticmethod
+    def _answer_summary(item):
+        a = item.get("answer") or {}
+        if a.get("later"):
+            return "svarer senere"
+        ctx = item.get("context") or {}
+        parts = []
+        if item["kind"] == "matrix":
+            opt = dict(ctx.get("options") or [])
+            parts = [f"{r['name']}: {opt.get((a.get('rows') or {}).get(str(r['company_id'])), '-')}" for r in ctx.get("rows") or []][:6]
+        else:
+            for i, q in enumerate(ctx.get("questions") or []):
+                if a.get(f"q{i}"):
+                    parts.append(f"{(q.get('text') if isinstance(q, dict) else q)[:60]} → {a[f'q{i}']}")
+            for k, label in (("status", "vurdering"), ("next_step", "næste skridt"), ("next_date", "dato"), ("probability", "sandsynlighed")):
+                if a.get(k):
+                    parts.append(f"{label}: {a[k]}")
+            if (a.get("followup") or {}).get("answer"):
+                parts.append(f"opfølgning: {a['followup']['answer']}")
+        return "; ".join(parts)[:400] or "(intet)"
+
+    def _suggest_followup_questions(self, db, rnd):
+        """Forslag til opfølgende spørgsmål fra CEO'en ud fra svarene (AI når den er slået til, ellers regler)."""
+        items = [it for it in rnd["items"] if it["kind"] != "matrix" and it.get("answer")]
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            payload = [{"item_id": it["id"], "emne": it["title"], "fakta": (it.get("context") or {}).get("facts"),
+                        "svar": self._answer_summary(it), "advarsler": it.get("flags")} for it in items]
+            system = self._ai_preamble(db, rnd["area"]) + (
+                "\nOpgave: CEO'en har læst lederens svar og vil stille opfølgende spørgsmål tilbage, før mødet. "
+                "Foreslå 3–6 skarpe opfølgende spørgsmål, hvor svarene er vage, modstridende, mangler ejer/dato/tal, "
+                "eller hvor der er en risiko eller mulighed, CEO'en bør forstå bedre. Hvert spørgsmål knyttes til et emne (item_id). "
+                "reason: én kort sætning til CEO'en om hvorfor.\n\n" + ANSWER_FORMAT_RULES)
+            schema = {"type": "object", "additionalProperties": False, "required": ["suggestions"], "properties": {"suggestions": {
+                "type": "array", "items": {"type": "object", "additionalProperties": False,
+                    "required": ["item_id", "text", "answer_type", "options", "reason"],
+                    "properties": {"item_id": {"type": "integer"}, "text": {"type": "string"},
+                                   "answer_type": {"type": "string", "enum": ["text", "choice", "date", "number"]},
+                                   "options": {"type": "array", "items": {"type": "string"}}, "reason": {"type": "string"}}}}}}
+            data, _ = self._claude(system, "Svar (JSON):\n" + json.dumps(payload, ensure_ascii=False, default=_json_default), schema)
+            titles = {it["id"]: it["title"] for it in items}
+            return [{**sgg, "about": titles.get(sgg["item_id"], "Generelt"), "source": "ai"} for sgg in data["suggestions"] if sgg["item_id"] in titles]
+        out = []
+        for it in items:
+            a = it.get("answer") or {}
+            ctx = it.get("context") or {}
+            for i, q in enumerate(ctx.get("questions") or []):
+                v = a.get(f"q{i}") or ""
+                qt = q.get("text") if isinstance(q, dict) else q
+                if UNKNOWN_RE.search(v):
+                    out.append({"item_id": it["id"], "about": it["title"], "text": f"Du svarede '{v}' til \u201d{qt}\u201d. Hvem finder ud af det, og hvornår?",
+                                "answer_type": "text", "options": [], "reason": "Svaret var 'ved ikke'.", "source": "regel"})
+            for f in it.get("flags") or []:
+                if f.startswith("Næste skridt uden dato"):
+                    out.append({"item_id": it["id"], "about": it["title"], "text": "Hvornår sker næste skridt?", "answer_type": "date",
+                                "options": [], "reason": f, "source": "regel"})
+                elif f.startswith("Modstrid") or f.startswith("Høj sandsynlighed"):
+                    out.append({"item_id": it["id"], "about": it["title"], "text": "Hvad konkret gør, at du vurderer det sådan?",
+                                "answer_type": "text", "options": [], "reason": f, "source": "regel"})
+        return out[:8]
 
     def _apply_report(self, db, rnd):
         """Overfører indsendte svar: målstatus til målets historik og kundestatus som note på virksomheden."""
@@ -3803,6 +4046,12 @@ class handler(BaseHTTPRequestHandler):
                 if not rnd.get("practice"):
                     self._apply_report(db, rnd)
                 db.execute("UPDATE report_rounds SET status = 'answered', submitted_at = CURRENT_TIMESTAMP WHERE id = %s", (rid,))
+                n_flags = sum(1 for it in rnd["items"] for f in it.get("flags") or [] if f != "Ikke besvaret")
+                kind = "opfølgende spørgsmål" if rnd.get("followup_of") else "indrapportering"
+                db.execute("""INSERT INTO notifications (company_id, type, title, message, link) VALUES (NULL, 'report', %s, %s, %s)""",
+                           (f"{rnd.get('respondent_name')} har svaret" + (" (øvelse)" if rnd.get("practice") else ""),
+                            f"Svar på {kind} om {dict(AREA_NAMES).get(rnd['area'], rnd['area'])}. {n_flags} advarsler. Klik for at gennemse.",
+                            f"#/reports/{rnd.get('followup_of') or rid}"))
                 db.commit()
                 self._json_response({"ok": True})
             else:
@@ -3821,7 +4070,7 @@ class handler(BaseHTTPRequestHandler):
                 where += " AND rr.area = %s"; p.append(q["area"][0])
             rows = [dict(r) for r in db.execute(f"""
                 SELECT rr.id, rr.area, rr.meeting_id, rr.respondent_name, rr.status, rr.due_date, rr.created_at,
-                       rr.sent_at, rr.submitted_at, rr.ai_generated_at, rr.token,
+                       rr.sent_at, rr.submitted_at, rr.ai_generated_at, rr.token, rr.practice, rr.reviewed_at, rr.followup_of,
                        (SELECT COUNT(*) FROM report_items ri WHERE ri.round_id = rr.id) AS items_total,
                        (SELECT COUNT(*) FROM report_items ri WHERE ri.round_id = rr.id AND ri.answer IS NOT NULL) AS items_answered
                 FROM report_rounds rr WHERE 1=1 {where} ORDER BY rr.created_at DESC""", p or None).fetchall()]
@@ -3831,7 +4080,53 @@ class handler(BaseHTTPRequestHandler):
             if not rnd:
                 self._error(404, "Indrapportering ikke fundet"); return True
             rnd["suggestions"] = self._cleanup_suggestions(db, rnd) if rnd["status"] != "draft" else []
+            rnd["is_new"] = rnd["status"] == "answered" and not rnd.get("reviewed_at")
+            if rnd["is_new"]:
+                db.execute("UPDATE report_rounds SET reviewed_at = CURRENT_TIMESTAMP WHERE id = %s", (rid,))
+                db.execute("UPDATE notifications SET is_read = TRUE WHERE link = %s AND type = 'report'", (f"#/reports/{rid}",))
+                db.commit()
+            rnd["followups"] = []
+            for f in db.execute("SELECT id FROM report_rounds WHERE followup_of = %s ORDER BY created_at", (rid,)).fetchall():
+                fr = self._round_full(db, f["id"])
+                if fr["status"] == "answered" and not fr.get("reviewed_at"):
+                    fr["is_new"] = True
+                    db.execute("UPDATE report_rounds SET reviewed_at = CURRENT_TIMESTAMP WHERE id = %s", (f["id"],))
+                    db.commit()
+                rnd["followups"].append(fr)
             self._json_response(rnd)
+        elif method == "POST" and sub == "suggest-questions":
+            rnd = self._round_full(db, rid)
+            try:
+                self._json_response({"suggestions": self._suggest_followup_questions(db, rnd)})
+            except Exception as e:
+                self._error(502, f"Kunne ikke foreslå spørgsmål: {e}")
+        elif method == "POST" and sub == "followup-round":
+            import secrets
+            rnd = self._round_full(db, rid)
+            qs = [q for q in (body.get("questions") or []) if (q.get("text") or "").strip()]
+            if not qs:
+                self._error(400, "Vælg eller skriv mindst ét spørgsmål"); return True
+            cur = db.execute("""INSERT INTO report_rounds (area, meeting_id, respondent_user_id, respondent_name, token, due_date,
+                                practice, status, followup_of) VALUES (%s,%s,%s,%s,%s,%s,%s,'open',%s) RETURNING id""",
+                             (rnd["area"], rnd.get("meeting_id"), rnd.get("respondent_user_id"), rnd.get("respondent_name"),
+                              secrets.token_urlsafe(24), body.get("due_date") or (date.today() + timedelta(days=3)).isoformat(),
+                              bool(rnd.get("practice")), rid))
+            new_id = cur.fetchone()["id"]
+            groups = {}
+            for q in qs:
+                groups.setdefault((q.get("about") or "Generelt", q.get("item_id")), []).append(q)
+            by_id = {it["id"]: it for it in rnd["items"]}
+            for i, ((about, item_id), questions) in enumerate(groups.items()):
+                src = by_id.get(item_id) or {}
+                facts = [f"Du svarede: {self._answer_summary(src)}"] if src.get("answer") else []
+                ctx = {"facts": facts, "why": "", "ask_status": False, "source_kind": "followup",
+                       "questions": [{"text": q["text"], "answer_type": q.get("answer_type") or "text", "options": q.get("options") or []} for q in questions]}
+                db.execute("""INSERT INTO report_items (round_id, kind, company_id, title, context, sort_order)
+                              VALUES (%s,'topic',%s,%s,%s,%s)""", (new_id, src.get("company_id"), about, json.dumps(ctx), i))
+            db.commit()
+            log_audit(db, uid, "create", "report_round", new_id, f"opfølgning på {rid}")
+            db.commit()
+            self._json_response(self._round_full(db, new_id), 201)
         elif method == "POST" and sub == "apply-suggestion":
             rnd = self._round_full(db, rid)
             if rnd.get("practice"):
@@ -3868,7 +4163,8 @@ class handler(BaseHTTPRequestHandler):
                                (new_id, it.get("kind", "topic"), it.get("ref_type"), it.get("ref_id"), it.get("company_id"),
                                 it["title"], json.dumps(it.get("context") or {}), i))
             else:
-                self._build_report_items(db, new_id, body["area"], user["id"])
+                self._build_report_items(db, new_id, body["area"], user["id"],
+                                         company_ids=body.get("company_ids") or None, only_customers=bool(body.get("only_customers")))
             db.commit()
             log_audit(db, uid, "create", "report_round", new_id, f"{body['area']} · {user['name']}")
             db.commit()

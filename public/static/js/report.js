@@ -240,14 +240,33 @@ function topicCard(it) {
 }
 
 // Bedste svarform: klik for kendte udfald, dato- og talfelter, fritekst kun når der skal forklares
+// Alle spørgsmål kan besvares med "Ved ikke", så modtageren aldrig sidder fast (det fanges som advarsel til CEO'en)
+const UNKNOWN = 'Ved ikke';
+const isUnknownOpt = o => /ved ikke|ikke afklaret|uvist/i.test(o);
 function answerInput(it, key, q) {
     const a = it.answer || {};
     if (q.answer_type === 'choice' && q.options.length) {
-        const tone = o => /tabt|kritisk|bagud|nej/i.test(o) ? 'bad' : /ved ikke|udskudt|risiko/i.test(o) ? 'warn' : /vundet|ja|afleveret|på sporet/i.test(o) ? 'good' : '';
-        return chips(q.options.map(o => [o, o, tone(o)]), a[key], k => { it.answer = { ...(it.answer || {}), [key]: k }; save(it); });
+        const opts = q.options.some(isUnknownOpt) ? q.options : [...q.options, UNKNOWN];
+        const tone = o => /tabt|kritisk|bagud|nej/i.test(o) ? 'bad' : isUnknownOpt(o) || /udskudt|risiko/i.test(o) ? 'warn' : /vundet|ja|afleveret|på sporet/i.test(o) ? 'good' : '';
+        return chips(opts.map(o => [o, o, tone(o)]), a[key], k => { it.answer = { ...(it.answer || {}), [key]: k }; save(it); });
     }
-    if (q.answer_type === 'date') return h('div', { style: 'max-width:200px' }, input(it, key, 'date'));
-    if (q.answer_type === 'number') return h('div', { style: 'max-width:200px' }, input(it, key, 'number'));
+    if (q.answer_type === 'date' || q.answer_type === 'number') {
+        const field = h('input', { type: q.answer_type });
+        const unknownBtn = h('button', { type: 'button', className: 'chip warn' }, UNKNOWN);
+        const sync = () => {
+            const unk = (it.answer || {})[key] === UNKNOWN;
+            unknownBtn.classList.toggle('on', unk);
+            field.disabled = unk;
+            field.value = unk ? '' : ((it.answer || {})[key] ?? '');
+        };
+        field.addEventListener('input', () => { it.answer = { ...(it.answer || {}), [key]: field.value }; save(it); });
+        unknownBtn.addEventListener('click', () => {
+            const unk = (it.answer || {})[key] === UNKNOWN;
+            it.answer = { ...(it.answer || {}), [key]: unk ? '' : UNKNOWN }; save(it); sync();
+        });
+        sync();
+        return h('div', { className: 'with-unknown' }, h('div', { style: 'max-width:200px;flex:1' }, field), unknownBtn);
+    }
     return text(it, key, '');
 }
 
@@ -356,12 +375,13 @@ function render() {
         h('div', { className: 'sec', style: 'margin-top:0' }, `Indrapportering · ${AREA[round.area] || round.area}`),
         round.practice ? h('div', { className: 'practice' }, 'Øvelse: dine svar bliver ikke gemt på mål eller kunder.') : null,
         h('h1', {}, `Hej ${first}`),
+        round.followup_of ? h('p', { className: 'intro' }, 'Tak for din indrapportering. Her er nogle opfølgende spørgsmål til dine svar. Det tager kun et par minutter.') :
         h('p', { className: 'intro' }, `Her er spørgsmålene til næste opfølgningsmøde${round.due_date ? `. Svar gerne senest ${fmtDate(round.due_date)}` : ''}. Dine svar gemmes løbende, så du kan holde pause og fortsætte senere. Korte, konkrete svar er fine. Skriv hellere "ved ikke" end ingenting.`));
     const groups = [
-        ['matrix', 'Hurtige afklaringer'], ['carried', 'Fra sidst: svarer senere'], ['topic', 'Emner'], ['customer', 'Kunder i proces'],
+        ['followup', 'Opfølgende spørgsmål'], ['matrix', 'Hurtige afklaringer'], ['carried', 'Fra sidst: svarer senere'], ['topic', 'Emner'], ['customer', 'Kunder i proces'],
         ['marketing', 'Marketing'], ['goal', 'Mål'], ['question', 'Spørgsmål'],
     ];
-    const groupOf = i => i.context?.carried ? 'carried' : i.kind;
+    const groupOf = i => i.context?.carried ? 'carried' : i.context?.source_kind === 'followup' ? 'followup' : i.kind;
     for (const [kind, label] of groups) {
         const its = round.items.filter(i => groupOf(i) === kind);
         if (!its.length) continue;

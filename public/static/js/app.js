@@ -1,4 +1,4 @@
-import { api } from './api.js?v=41';
+import { api } from './api.js?v=44';
 
 // ─── Constants ───
 const CATEGORY_LABELS = { opkald:'Opkald', tilbud:'Tilbud', moede:'Møde', opfølgning:'Opfølgning', demo:'Demo', kontrakt:'Kontrakt', implementering:'Implementering', support:'Support', faktura:'Fakturering', budget:'Budget', generelt:'Generelt' };
@@ -501,14 +501,19 @@ function initNotifications() {
         await loadNotifications();
         updateNotifBadge();
     });
+    document.getElementById('clear-read-notifications')?.addEventListener('click', async () => {
+        await api.clearReadNotifications();
+        await loadNotifications();
+    });
 
     // Check notifications in background after 3s (don't block page load)
     setTimeout(async () => {
         try { await api.checkNotifications(); updateNotifBadge(); } catch(e) {}
     }, 3000);
+    // Scoretjekket er tungt og giver kun nyt ved ændringer, så hver halve time er nok
     notifInterval = setInterval(async () => {
         try { await api.checkNotifications(); updateNotifBadge(); } catch(e) {}
-    }, 60000);
+    }, 30 * 60000);
 }
 
 async function updateNotifBadge() {
@@ -535,11 +540,11 @@ async function loadNotifications() {
         }
         for (const n of notifs) {
             const item = h('div', {
-                className: `notif-item ${n.is_read ? '' : 'unread'}`,
+                className: `notif-item ${n.is_read ? '' : 'unread'} ${n.type === 'report' ? 'notif-report' : ''}`,
                 onClick: async () => {
                     if (!n.is_read) { await api.markNotificationRead(n.id); updateNotifBadge(); }
                     document.getElementById('notification-panel').classList.add('hidden');
-                    location.hash = `#/companies/${n.company_id}`;
+                    location.hash = n.link || `#/companies/${n.company_id}`;
                 }
             },
                 h('div', { className: 'flex justify-between items-start' },
@@ -5221,7 +5226,7 @@ function reportPanel(m) {
             box.appendChild(h('button', { className: 'act-btn primary', onClick: () => showReportRequestForm(m) }, 'Bed om indrapportering'));
             return;
         }
-        for (const r of rounds) {
+        for (const r of rounds.filter(x => !x.followup_of)) {
             const link = reportLink(r);
             if (r.status === 'draft') {
                 box.appendChild(h('div', { className: 'report-row' },
@@ -5241,6 +5246,8 @@ function reportPanel(m) {
                 h('div', { className: 'flex items-center gap-2 flex-wrap' },
                     h('b', {}, r.respondent_name),
                     h('span', { className: `gs-pill ${answered ? 'gs-good' : r.sent_at ? 'gs-warn' : 'gs-none'}` }, answered ? 'Indsendt' : r.sent_at ? 'Afventer svar' : 'Ikke sendt'),
+                    answered && !r.reviewed_at ? h('span', { className: 'new-pill' }, 'Ny') : null,
+                    r.practice ? h('span', { className: 'gs-pill gs-none' }, 'Øvelse') : null,
                     h('span', { className: 'text-sm text-gray-500' }, reportStatusText(r)),
                     r.due_date ? h('span', { className: 'text-sm text-gray-500' }, `· frist ${formatDate(r.due_date)}`) : null),
                 !answered ? h('div', { className: 'flex gap-2 mt-2 flex-wrap items-center' },
@@ -5268,8 +5275,13 @@ function reportPanel(m) {
 }
 
 async function showReportRequestForm(m) {
-    const [allUsers, cfg] = await Promise.all([api.getUsers(), api.getReportConfig().catch(() => ({}))]);
+    const [allUsers, cfg, companies] = await Promise.all([api.getUsers(), api.getReportConfig().catch(() => ({})), api.getCompanies().catch(() => [])]);
     const users = allUsers.filter(u => !u.deleted_at);
+    // Valgfrit: kun bestemte kunder (fx en kort runde eller en test med 3 kunder)
+    const custSel = h('select', { multiple: '', size: '8', className: 'w-full border border-gray-300 rounded-lg px-2 py-1 text-sm mt-2', style: 'display:none' },
+        ...companies.filter(c => !c.is_purchasing_group).map(c => h('option', { value: c.id }, c.name)));
+    const pickCustomers = h('input', { type: 'checkbox', className: 'mt-1' });
+    pickCustomers.addEventListener('change', () => { custSel.style.display = pickCustomers.checked ? '' : 'none'; });
     const remembered = localStorage.getItem(`reportRespondent_${m.area}`);
     const due = addDaysIso(-1, (m.meeting_date || todayIso()).slice(0, 10));
     const form = h('form', { className: 'space-y-4', onSubmit: async (e) => {
@@ -5277,9 +5289,12 @@ async function showReportRequestForm(m) {
         const fd = new FormData(e.target);
         localStorage.setItem(`reportRespondent_${m.area}`, fd.get('respondent_user_id'));
         const useAi = !!fd.get('ai_questions');
+        const chosen = pickCustomers.checked ? [...custSel.selectedOptions].map(o => parseInt(o.value)) : null;
+        if (pickCustomers.checked && !chosen.length) { alert('Vælg mindst én kunde.'); return; }
         try {
             const r = await api.createReportRound({ area: m.area, meeting_id: m.id, respondent_user_id: parseInt(fd.get('respondent_user_id')),
-                due_date: fd.get('due_date') || null, ai_questions: useAi, practice: !!fd.get('practice') });
+                due_date: fd.get('due_date') || null, ai_questions: useAi, practice: !!fd.get('practice'),
+                company_ids: chosen, only_customers: !!fd.get('only_customers') });
             if (useAi) await runAiQuestionGeneration(r.id);
             else { closeModal(); router(); }
         } catch (err) { alert(err.message); }
@@ -5295,6 +5310,13 @@ async function showReportRequestForm(m) {
             h('span', {}, h('b', {}, 'Lad AI formulere spørgsmålene'), h('br', {}),
                 cfg.ai ? 'Claude læser kunder, sager, mål og din beskrivelse af salgsprocessen og laver skarpe spørgsmål. Du gennemser og godkender dem, før linket virker.'
                        : 'Kræver ANTHROPIC_API_KEY i Vercel. Ellers bruges de faste spørgsmål.')),
+        h('div', { className: 'text-sm' },
+            h('label', { className: 'flex items-start gap-2' }, pickCustomers,
+                h('span', {}, h('b', {}, 'Vælg bestemte kunder'), h('br', {}), 'Ellers bruges alle kunder i proces, og de 12 vigtigste får egne spørgsmål. Hold Cmd nede for at vælge flere.')),
+            custSel),
+        h('label', { className: 'flex items-start gap-2 text-sm' },
+            h('input', { type: 'checkbox', name: 'only_customers', className: 'mt-1' }),
+            h('span', {}, h('b', {}, 'Kun kunder'), h('br', {}), 'Spring mål, marketing og faste spørgsmål over.')),
         h('label', { className: 'flex items-start gap-2 text-sm' },
             h('input', { type: 'checkbox', name: 'practice', className: 'mt-1' }),
             h('span', {}, h('b', {}, 'Øvelse'), h('br', {}), 'Svarene bliver ikke overført til mål eller kunder. Godt til at prøve løsningen af.')),
@@ -5379,6 +5401,9 @@ async function renderReportRound(container, id) {
     container.appendChild(fl);
 
     // Svar
+    if (r.is_new) container.appendChild(h('div', { className: 'new-banner mb-4' }, `Nye svar fra ${r.respondent_name}. Markeret som gennemset nu.`));
+    container.appendChild(renderFollowupSection(r));
+
     // Forslag til oprydning (tabt/vundet/ikke i proces/afleveret → ét klik)
     if ((r.suggestions || []).length) {
         const sbox = h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6' },
@@ -5731,16 +5756,192 @@ async function openAssistant() {
     const quick = ['Lav min plan for ugen', 'Hvad skal jeg tage op med CCO?', 'Hvad skal jeg tage op med COO?', 'Hvad skal jeg tage op med CFO?', 'Hvilke mål er i fare, og hvad gør jeg?'];
     drawChat();
 
+    // To faner: hvad mangler (tjekliste + spørg) og "Udfordr mig" (lederspejl + sparring)
+    const todoView = h('div', {});
+    const coachView = h('div', { style: 'display:none' });
+    const tabBtns = [['Hvad mangler', todoView], ['Udfordr mig', coachView]].map(([label, view], i) => {
+        const b = h('button', { className: `as-tab ${i === 0 ? 'on' : ''}` }, label);
+        b.addEventListener('click', () => {
+            tabBtns.forEach(x => x.classList.remove('on')); b.classList.add('on');
+            todoView.style.display = view === todoView ? '' : 'none';
+            coachView.style.display = view === coachView ? '' : 'none';
+            if (view === coachView && !coachView.dataset.loaded) { coachView.dataset.loaded = '1'; renderCoach(coachView, a.ai); }
+        });
+        return b;
+    });
     panel.append(
         h('div', { className: 'as-head' },
             h('div', {}, h('div', { className: 'font-bold text-gray-900 text-lg' }, '✦ CEO-assistent'),
                 h('div', { className: 'text-xs text-gray-500' }, `${a.counts.kritisk} kritiske · ${a.counts.vigtig} vigtige · ${a.counts.tips} tips`)),
             h('button', { className: 'text-gray-400 hover:text-gray-700 text-2xl', onClick: closeAssistant }, '×')),
-        h('div', { className: 'as-body' },
+        h('div', { className: 'as-tabs' }, ...tabBtns),
+        h('div', { className: 'as-body' }, coachView, todoView));
+    todoView.append(
             h('div', { className: 'as-ai' },
                 h('div', { className: 'font-semibold text-gray-900 mb-2' }, 'Spørg assistenten'),
                 a.ai ? h('div', { className: 'flex flex-wrap gap-1 mb-2' }, ...quick.map(q => h('button', { className: 'as-chip', onClick: () => ask(q) }, q)))
                      : h('div', { className: 'text-xs text-yellow-700 mb-2' }, 'Kræver ANTHROPIC_API_KEY i Vercel. Tjeklisten herunder virker uden.'),
                 chat, input),
-            list));
+            list);
+}
+
+// "Udfordr mig": lederspejl (altid) + AI-sparring om CEO'ens egen ledelse
+let _coachChat = [];
+async function renderCoach(view, aiOn) {
+    view.innerHTML = '<div class="text-sm text-gray-400 p-2">Ser på dine møder, aktioner, mål og indrapporteringer…</div>';
+    let mirror;
+    try { mirror = await api.getLeadershipMirror(); } catch (e) { view.innerHTML = `<div class="text-red-600 p-2">${e.message}</div>`; return; }
+    view.innerHTML = '';
+    const m = mirror.metrics;
+    const AREAS = { salg: 'Salg', leverance: 'Leverance', oekonomi: 'Økonomi' };
+    const since30 = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
+    const tile = (v, l, cls = '') => h('div', { className: `mir-tile ${cls}` }, h('b', {}, v), h('span', {}, l));
+
+    // Sparring (AI) øverst
+    const chat = h('div', { className: 'as-chat' });
+    const drawChat = () => {
+        chat.innerHTML = '';
+        for (const msg of _coachChat) chat.appendChild(msg.role === 'user' ? h('div', { className: 'as-q' }, msg.content) : h('div', { className: 'as-a md', innerHTML: miniMarkdown(msg.content) }));
+    };
+    const ask = async (q) => {
+        if (!q.trim()) return;
+        _coachChat.push({ role: 'user', content: q }); drawChat();
+        chat.appendChild(h('div', { className: 'as-a text-gray-400' }, 'Tænker…'));
+        try { const res = await api.askAssistant(q, _coachChat.slice(0, -1), 'coach'); _coachChat.push({ role: 'assistant', content: res.answer }); }
+        catch (e) { _coachChat.push({ role: 'assistant', content: `Fejl: ${e.message}` }); }
+        drawChat(); chat.scrollTop = chat.scrollHeight;
+    };
+    const input = h('input', { className: 'as-input', placeholder: aiOn ? 'Spørg din sparringspartner…' : 'AI er ikke slået til endnu', ...(aiOn ? {} : { disabled: '' }) });
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') { const q = input.value; input.value = ''; ask(q); } });
+    const prompts = ['Udfordr mig som leder', 'Hvad har jeg tabt af syne?', 'Stil mig de svære spørgsmål', 'Hvordan bliver mine ledermøder bedre?', 'Hvad bør jeg uddelegere eller droppe?'];
+    view.appendChild(h('div', { className: 'as-ai coach' },
+        h('div', { className: 'font-semibold text-gray-900 mb-1' }, 'Sparring'),
+        h('div', { className: 'text-xs text-gray-500 mb-2' }, 'Claude udfordrer din ledelse ud fra lederspejlet og data, og slutter med én ting til denne uge.'),
+        aiOn ? h('div', { className: 'flex flex-wrap gap-1 mb-2' }, ...prompts.map(q => h('button', { className: 'as-chip', onClick: () => ask(q) }, q)))
+             : h('div', { className: 'text-xs text-yellow-700 mb-2' }, 'Kræver ANTHROPIC_API_KEY i Vercel. Lederspejlet herunder virker uden.'),
+        chat, input));
+    drawChat();
+
+    // Lederspejl (altid)
+    view.appendChild(h('div', { className: 'as-ai' },
+        h('div', { className: 'font-semibold text-gray-900 mb-2' }, 'Dit lederspejl'),
+        h('div', { className: 'mir-grid' },
+            tile(`${Object.keys(AREAS).filter(k => m.last_meeting[k] && m.last_meeting[k] >= since30).length}/3`, 'ledere mødt (30 d)'),
+            tile(m.actions_on_time_pct == null ? '–' : `${m.actions_on_time_pct} %`, 'aktioner til tiden', m.actions_on_time_pct != null && m.actions_on_time_pct < 60 ? 'bad' : ''),
+            tile(`${m.goals_updated_30}/${m.goals}`, 'mål opdateret (30 d)', m.goals && m.goals_updated_30 / m.goals < 0.5 ? 'warn' : ''),
+            tile(String(m.ceo_actions_overdue), 'dine aktioner over frist', m.ceo_actions_overdue ? 'bad' : ''),
+            tile(String(m.decisions_90), 'beslutninger (90 d)'),
+            tile(String(m.snoozed_now), 'udsatte punkter', m.snoozed_now >= 5 ? 'warn' : '')),
+        h('div', { className: 'text-xs text-gray-500 mt-3 mb-1' }, 'Din opmærksomhed de sidste 30 dage'),
+        Object.values(m.attention_pct).some(v => v)
+            ? h('div', { className: 'att-bar' }, ...Object.entries(AREAS).map(([k, l]) =>
+                m.attention_pct[k] ? h('i', { className: `att-${k}`, style: `flex:${m.attention_pct[k]}`, title: `${l} ${m.attention_pct[k]} %` }, `${l} ${m.attention_pct[k]} %`) : null))
+            : h('div', { className: 'text-xs text-gray-400' }, 'Ingen møder, opdateringer eller aktioner endnu.')));
+
+    const KIND = { udfordring: ['Udfordring', 'gs-bad'], refleksion: ['Til refleksion', 'gs-warn'], styrke: ['Styrke', 'gs-good'] };
+    view.appendChild(h('div', { className: 'as-sec' }, `Observationer (${mirror.observations.length})`));
+    if (!mirror.observations.length) view.appendChild(h('div', { className: 'text-sm text-gray-500 p-2' }, 'Ingen observationer endnu. Der er for lidt historik.'));
+    for (const ob of mirror.observations) {
+        view.appendChild(h('div', { className: `as-item sev-${ob.kind === 'udfordring' ? 'kritisk' : ob.kind === 'refleksion' ? 'vigtig' : 'tips'}` },
+            h('span', { className: `gs-pill ${KIND[ob.kind][1]}` }, KIND[ob.kind][0]),
+            h('div', { className: 'as-title mt-1' }, ob.title),
+            h('div', { className: 'as-detail' }, ob.detail),
+            ob.href ? h('a', { href: ob.href, className: 'text-xs font-semibold text-blue-600 hover:underline mt-1 inline-block', onClick: closeAssistant }, 'Gå dertil \u2192') : null));
+    }
+}
+
+
+// ─── Opfølgende spørgsmål fra CEO'en tilbage til lederen ───
+function renderFollowupSection(r) {
+    const box = h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6' });
+    const answeredItems = r.items.filter(it => it.kind !== 'matrix' && it.answer);
+    box.appendChild(h('div', { className: 'flex items-center justify-between mb-2' },
+        h('h2', { className: 'font-semibold text-gray-900' }, `Opfølgende spørgsmål til ${r.respondent_name}`),
+        h('span', { className: 'text-xs text-gray-500' }, 'Svarene samles her under indrapporteringen')));
+
+    // Tidligere opfølgningsrunder og deres svar
+    for (const f of r.followups || []) {
+        const done = f.status !== 'open';
+        const fb = h('div', { className: 'fu-round' },
+            h('div', { className: 'flex items-center gap-2 mb-2 flex-wrap' },
+                h('b', {}, `Opfølgning ${formatDate(f.created_at)}`),
+                h('span', { className: `gs-pill ${done ? 'gs-good' : 'gs-warn'}` }, done ? 'Besvaret' : 'Afventer svar'),
+                f.is_new ? h('span', { className: 'new-pill' }, 'Ny') : null,
+                !done ? h('button', { className: 'act-btn', onClick: async (e) => { await navigator.clipboard.writeText(reportLink(f)); e.target.textContent = 'Kopieret ✓'; } }, 'Kopiér link') : null,
+                !done ? h('a', { href: reportLink(f), target: '_blank', className: 'act-btn' }, 'Se som modtager') : null));
+        for (const it of f.items) {
+            const a = it.answer || {};
+            fb.appendChild(h('div', { className: 'text-sm mb-2' }, h('div', { className: 'font-semibold text-gray-800' }, it.title),
+                ...(it.context?.questions || []).map((q, i) => h('div', { className: 'ml-3' },
+                    h('span', { className: 'text-gray-500' }, (q.text || q) + ' '),
+                    h('span', { className: a[`q${i}`] ? 'text-gray-900 font-medium' : 'text-gray-400' }, a.later ? '→ svarer senere' : `→ ${a[`q${i}`] || '(ikke besvaret)'}`)))));
+        }
+        box.appendChild(fb);
+    }
+
+    // Nye spørgsmål: forslag (AI/regler) + egne
+    const picked = [];
+    const list = h('div', { className: 'space-y-2 mt-2' });
+    const TYPES = { text: 'Tekst', choice: 'Klik-valg', date: 'Dato', number: 'Tal' };
+    const drawPicked = () => {
+        list.innerHTML = '';
+        picked.forEach((q, i) => {
+            const ta = h('input', { value: q.text, className: 'flex-1 border border-gray-300 rounded-lg px-2 py-1.5 text-sm' });
+            ta.addEventListener('input', () => { q.text = ta.value; });
+            const cb = h('input', { type: 'checkbox', ...(q.on ? { checked: '' } : {}) });
+            cb.addEventListener('change', () => { q.on = cb.checked; sendBtn.textContent = `Send ${picked.filter(x => x.on).length} spørgsmål`; });
+            list.appendChild(h('div', { className: 'fq-row' }, cb,
+                h('div', { className: 'flex-1 min-w-0' },
+                    h('div', { className: 'text-xs text-gray-500 mb-1' }, `${q.about} · ${TYPES[q.answer_type] || 'Tekst'}${q.options?.length ? ': ' + q.options.join(' / ') : ''}${q.reason ? ' · ' + q.reason : ''}`),
+                    h('div', { className: 'flex gap-2' }, ta)),
+                h('button', { className: 'text-gray-300 hover:text-red-500 text-lg', onClick: () => { picked.splice(i, 1); drawPicked(); } }, '×')));
+        });
+        sendBtn.style.display = picked.length ? '' : 'none';
+        sendBtn.textContent = `Send ${picked.filter(x => x.on).length} spørgsmål`;
+    };
+    const suggestBtn = h('button', { className: 'act-btn', onClick: async () => {
+        suggestBtn.disabled = true; suggestBtn.textContent = 'Finder spørgsmål…';
+        try {
+            const res = await api.suggestReportQuestions(r.id);
+            for (const sg of res.suggestions) picked.push({ ...sg, on: true });
+            if (!res.suggestions.length) alert('Ingen oplagte opfølgende spørgsmål. Skriv selv et.');
+        } catch (e) { alert(e.message); }
+        suggestBtn.disabled = false; suggestBtn.textContent = 'Foreslå spørgsmål';
+        drawPicked();
+    } }, 'Foreslå spørgsmål');
+    const aboutSel = h('select', { className: 'border border-gray-300 rounded-lg px-2 py-1.5 text-sm' },
+        h('option', { value: '' }, 'Generelt'), ...answeredItems.map(it => h('option', { value: it.id }, it.title)));
+    const typeSel = h('select', { className: 'border border-gray-300 rounded-lg px-2 py-1.5 text-sm' }, ...Object.entries(TYPES).map(([k, v]) => h('option', { value: k }, v)));
+    const ownText = h('input', { className: 'flex-1 border border-gray-300 rounded-lg px-2 py-1.5 text-sm', placeholder: 'Skriv dit eget spørgsmål' });
+    const ownOpts = h('input', { className: 'border border-gray-300 rounded-lg px-2 py-1.5 text-sm', placeholder: 'Valg, adskilt med komma', style: 'display:none;width:220px' });
+    typeSel.addEventListener('change', () => { ownOpts.style.display = typeSel.value === 'choice' ? '' : 'none'; });
+    const addOwn = () => {
+        if (!ownText.value.trim()) return;
+        const item = answeredItems.find(it => String(it.id) === aboutSel.value);
+        picked.push({ item_id: item?.id || null, about: item?.title || 'Generelt', text: ownText.value.trim(), answer_type: typeSel.value,
+                      options: typeSel.value === 'choice' ? ownOpts.value.split(',').map(x => x.trim()).filter(Boolean) : [], on: true, source: 'ceo' });
+        ownText.value = ''; ownOpts.value = ''; drawPicked();
+    };
+    ownText.addEventListener('keydown', e => { if (e.key === 'Enter') addOwn(); });
+    const sendBtn = h('button', { className: 'act-btn primary', style: 'display:none', onClick: async () => {
+        const qs = picked.filter(q => q.on && q.text.trim());
+        if (!qs.length) return;
+        try {
+            const nr = await api.createFollowupRound(r.id, { questions: qs });
+            await navigator.clipboard.writeText(reportLink(nr)).catch(() => {});
+            alert(`Opfølgningen er oprettet, og linket er kopieret:\n${reportLink(nr)}\n\nSend det til ${r.respondent_name}.`);
+            router();
+        } catch (e) { alert(e.message); }
+    } }, 'Send');
+    if (r.status !== 'open') {
+        box.append(
+            h('div', { className: 'flex items-center gap-2 mt-3 flex-wrap' }, suggestBtn,
+                h('span', { className: 'text-xs text-gray-500' }, 'eller skriv dit eget:')),
+            h('div', { className: 'flex gap-2 mt-2 flex-wrap items-center' }, aboutSel, ownText, typeSel, ownOpts,
+                h('button', { className: 'act-btn', onClick: addOwn }, 'Tilføj')),
+            list, h('div', { className: 'mt-3' }, sendBtn));
+    } else {
+        box.appendChild(h('div', { className: 'text-sm text-gray-400' }, 'Kan stilles, når der er svar.'));
+    }
+    return box;
 }

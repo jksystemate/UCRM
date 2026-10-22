@@ -912,3 +912,26 @@ th.cursor-pointer:hover { color: #374151; }
 .as-focus .as-item { margin-bottom: 0; background: var(--surface2); }
 .as-spark { color: #c3a95c; font-size: 18px; }
 .as-item .act-btn { white-space: normal; text-align: left; line-height: 1.3; }
+
+/* ─── Nye svar og opfølgning ─── */
+.new-pill { display: inline-flex; padding: 2px 8px; border-radius: 999px; font-size: .7rem; font-weight: 700; background: var(--bad); color: #fff; letter-spacing: .03em; }
+.new-banner { padding: 10px 14px; border-radius: 10px; background: var(--accent-soft); color: var(--accent); font-weight: 600; font-size: 14px; }
+.fu-round { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; margin: 8px 0; background: var(--surface2); }
+.fq-row { display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; }
+.notif-item.notif-report { border-left: 4px solid var(--gold, #c3a95c); }
+.notif-item.notif-report.unread { background: #fbf6ee; border-color: #ecd29f; }
+
+/* ─── Udfordr mig: lederspejl ─── */
+.as-tabs { display: flex; gap: 4px; padding: 8px 16px 0; background: var(--surface); border-bottom: 1px solid var(--border); }
+.as-tab { padding: 8px 14px; font-size: 14px; font-weight: 600; color: var(--muted); border-bottom: 2px solid transparent; }
+.as-tab.on { color: var(--accent); border-bottom-color: var(--accent); }
+.as-ai.coach { border-left-color: var(--area-tvaers); }
+.mir-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.mir-tile { background: var(--surface2); border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; }
+.mir-tile b { font-size: 20px; color: var(--text); line-height: 1.1; }
+.mir-tile span { font-size: 11.5px; color: var(--muted); }
+.mir-tile.bad b { color: var(--bad); }
+.mir-tile.warn b { color: var(--warn); }
+.att-bar { display: flex; gap: 2px; height: 22px; border-radius: 6px; overflow: hidden; background: var(--surface2); }
+.att-bar i { display: flex; align-items: center; justify-content: center; font-style: normal; font-size: 11px; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; }
+.att-salg { background: var(--area-salg); } .att-leverance { background: var(--area-leverance); } .att-oekonomi { background: var(--area-oekonomi); }

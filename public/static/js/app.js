@@ -1,4 +1,4 @@
-import { api } from './api.js?v=27';
+import { api } from './api.js?v=36';
 
 // ─── Constants ───
 const CATEGORY_LABELS = { opkald:'Opkald', tilbud:'Tilbud', moede:'Møde', opfølgning:'Opfølgning', demo:'Demo', kontrakt:'Kontrakt', implementering:'Implementering', support:'Support', faktura:'Fakturering', budget:'Budget', generelt:'Generelt' };
@@ -48,6 +48,14 @@ async function router() {
             await renderTasks(content);
         } else if (parts[0] === 'area' && AREA_LABELS[parts[1]]) {
             await renderTasks(content, parts[1]);
+        } else if (parts[0] === 'goals' && parts[1]) {
+            await renderGoalDetail(content, parseInt(parts[1]));
+        } else if (parts[0] === 'goals') {
+            await renderGoals(content);
+        } else if (parts[0] === 'meetings' && parts[1]) {
+            await renderMeetingDetail(content, parseInt(parts[1]));
+        } else if (parts[0] === 'meetings') {
+            await renderMeetings(content);
         } else if (parts[0] === 'users') {
             await renderUsers(content);
         } else if (parts[0] === 'settings') {
@@ -647,7 +655,7 @@ function renderCustomerMatrix(scores) {
 // ─── Dashboard ───
 async function renderDashboard(container) {
     container.innerHTML = '<div class="text-gray-400">Indlæser dashboard...</div>';
-    const dashData = await api.getDashboardAll();
+    const [dashData, ceoData] = await Promise.all([api.getDashboardAll(), api.getCeoOverview().catch(() => null)]);
     const scores = dashData.scores;
     const stats = dashData.stats;
     const allTags = dashData.all_tags || [];
@@ -655,7 +663,7 @@ async function renderDashboard(container) {
     container.innerHTML = '';
     container.className = 'ml-64 p-8 fade-in';
 
-    container.appendChild(renderCeoOverview(dashData));
+    container.appendChild(renderCeoOverview(dashData, ceoData));
 
     // ─── Active Tenders ───
     const activeTenders = dashData.active_tenders || [];
@@ -836,7 +844,7 @@ const AREA_ICONS = {
     oekonomi: 'M12 21a9 9 0 100-18 9 9 0 000 18zm0-14v10m3-8.5c-.7-.9-1.8-1.5-3-1.5-1.7 0-3 1-3 2.3 0 3.2 6 1.6 6 4.7 0 1.3-1.3 2.5-3 2.5-1.3 0-2.4-.6-3-1.5',
 };
 
-function renderCeoOverview(d) {
+function renderCeoOverview(d, ceo) {
     const wrap = h('div', {});
     const today = new Date().toISOString().split('T')[0];
     const tasks = d.active_tasks || [];
@@ -910,6 +918,8 @@ function renderCeoOverview(d) {
         ])
     ));
 
+    if (ceo) wrap.appendChild(renderGoalsStrip(ceo));
+
     // Relations banner (keeps the old score filters one click away)
     const lvl = (n, label, level) => h('a', { href: '#/companies', className: 'hover:underline', onClick: () => { _companiesLevelFilter = level; } }, `${n} ${label}`);
     wrap.appendChild(h('div', { className: 'ov-banner' },
@@ -930,13 +940,20 @@ function renderCeoOverview(d) {
         ...tasks.filter(overdue).map(t => ({ days: Math.ceil((new Date(today) - new Date(t.due_date)) / 86400000), co: t.company_name, sub: t.title, area: areaOf(t), href: `#/tasks/${t.id}` })),
         ...overdueTenders.map(t => ({ days: Math.ceil((new Date(today) - new Date(t.deadline)) / 86400000), co: t.company_name, sub: `Tilbud: ${t.title}`, area: 'salg', href: `#/tenders/${t.id}` })),
     ].sort((a, b) => b.days - a.days);
+    if (ceo) {
+        for (const a of ceo.open_actions.filter(a => a.kind === 'aktion' && a.due_date && a.due_date < today)) {
+            actions.push({ days: Math.ceil((new Date(today) - new Date(a.due_date)) / 86400000), co: `Aktion · ${a.owner || 'ingen ansvarlig'}`, sub: a.title, area: a.area === 'tvaers' ? 'salg' : a.area, href: a.goal_id ? `#/goals/${a.goal_id}` : '#/meetings' });
+        }
+        actions.sort((a, b) => b.days - a.days);
+    }
     const highOpen = tasks.filter(t => !overdue(t) && (t.priority === 'high' || t.priority === 'urgent'))
         .map(t => ({ days: null, co: t.company_name, sub: t.title, area: areaOf(t), href: `#/tasks/${t.id}` }));
-    const actionList = [...actions, ...highOpen].slice(0, 8);
+    const goalAlerts = ceo ? ceo.goals.filter(g => g.status === 'off_track').map(g => ({ days: null, goal: true, co: `Mål bagud · ${g.owner_role || ''}`, sub: g.title, area: g.area === 'tvaers' ? 'salg' : g.area, href: `#/goals/${g.id}` })) : [];
+    const actionList = [...goalAlerts, ...actions, ...highOpen].slice(0, 10);
 
     const actPanel = h('div', { className: 'ov-panel' },
         h('h2', {}, h('span', { className: 'ov-dot' }), 'Kræver handling',
-            h('span', { className: 'text-sm font-normal text-gray-400' }, `${actions.length} forfaldne · ${highOpen.length} høj prioritet`)));
+            h('span', { className: 'text-sm font-normal text-gray-400' }, `${goalAlerts.length} mål bagud · ${actions.length} over frist · ${highOpen.length} høj prioritet`)));
     if (actionList.length === 0) {
         actPanel.appendChild(h('div', { className: 'text-gray-400 text-sm py-6 text-center' }, 'Intet forfaldent — godt gået.'));
     }
@@ -946,7 +963,7 @@ function renderCeoOverview(d) {
             h('div', { className: 'min-w-0' },
                 h('div', { className: 'act-co truncate' }, a.co),
                 h('div', { className: 'act-sub truncate' }, a.sub)),
-            h('span', { className: 'act-tag', style: `color:${a.days ? 'var(--bad)' : 'var(--warn)'}` }, a.days ? `${a.days}d over frist` : 'Høj prioritet')
+            h('span', { className: 'act-tag', style: `color:${a.days || a.goal ? 'var(--bad)' : 'var(--warn)'}` }, a.days ? `${a.days}d over frist` : a.goal ? 'Bagud' : 'Høj prioritet')
         ));
     }
 
@@ -3435,7 +3452,8 @@ async function renderTaskDetail(container, id) {
 
 async function renderTasks(container, area = null) {
     container.innerHTML = '<div class="text-gray-400">Indlæser...</div>';
-    const [allTasks, users] = await Promise.all([api.getTasks(), api.getUsers()]);
+    const [allTasks, users, areaGoals] = await Promise.all([api.getTasks(), api.getUsers(),
+        area ? api.getGoals({ area }).catch(() => []) : Promise.resolve([])]);
     container.innerHTML = '';
     container.className = 'ml-64 p-8 fade-in';
 
@@ -3469,6 +3487,18 @@ async function renderTasks(container, area = null) {
         h('input', { type: 'checkbox', ...(showDone ? { checked: '' } : {}), onChange: (e) => { sessionStorage.setItem('tasksShowDone', e.target.checked ? '1' : '0'); router(); } }),
         'Vis færdige sager');
     container.appendChild(h('div', { className: 'flex flex-wrap items-center justify-between gap-3 mb-5' }, tabs, doneToggle));
+
+    if (area) {
+        container.appendChild(h('div', { className: 'flex items-baseline justify-between mb-3' },
+            h('h2', { className: 'text-lg font-bold text-gray-900' }, `Mål · ${AREA_ROLE[area]}`),
+            h('div', { className: 'flex gap-4 text-sm' },
+                h('button', { className: 'font-semibold text-blue-600 hover:underline', onClick: () => showGoalForm(null, { area }) }, '+ Nyt mål'),
+                h('a', { href: '#/meetings', className: 'font-semibold text-blue-600 hover:underline' }, 'Ledermøder →'))));
+        container.appendChild(areaGoals.length
+            ? h('div', { className: 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 mb-6' }, ...areaGoals.map(g => goalCard(g, { compact: true })))
+            : h('div', { className: 'empty-box mb-6' }, 'Ingen mål for området endnu.'));
+        container.appendChild(h('h2', { className: 'text-lg font-bold text-gray-900 mb-3' }, 'Sager'));
+    }
 
     // KPI tiles
     const open = tasks.filter(t => t.status !== 'done');
@@ -4214,4 +4244,898 @@ async function renderSettings(container) {
 
     // Load templates
     loadTemplates();
+}
+
+// ════════════════════════════════════════════════════════════════════
+// SystemateCEO — mål, statusopdateringer og strukturerede ledermøder
+// ════════════════════════════════════════════════════════════════════
+const GOAL_AREAS = { ...AREA_LABELS, tvaers: 'Tværgående' };
+const AREA_ROLE = { salg: 'CCO', leverance: 'COO', oekonomi: 'CFO', tvaers: 'CEO' };
+const ROLE_LABELS = { CEO: 'CEO', CCO: 'CCO · salg & marketing', COO: 'COO · leverance', CFO: 'CFO · økonomi' };
+const MEETING_TITLES = {
+    salg: 'Salg & marketing med CCO',
+    leverance: 'Leverance med COO',
+    oekonomi: 'Økonomi med CFO',
+    tvaers: 'Ledelsesmøde · strategi',
+};
+const GOAL_KIND_LABELS = { drift: 'Driftsmål', strategisk: 'Strategisk mål' };
+const GOAL_STATUS = {
+    not_started: { label: 'Ikke vurderet', cls: 'gs-none' },
+    on_track: { label: 'På sporet', cls: 'gs-good' },
+    at_risk: { label: 'I risiko', cls: 'gs-warn' },
+    off_track: { label: 'Bagud', cls: 'gs-bad' },
+    done: { label: 'Nået', cls: 'gs-done' },
+};
+const STALE_DAYS = 30; // et mål uden statusopdatering i så mange dage markeres som "ikke fulgt op"
+
+function todayIso() { return new Date().toISOString().split('T')[0]; }
+function addDaysIso(days, from = todayIso()) {
+    const d = new Date(from + 'T00:00:00'); d.setDate(d.getDate() + days);
+    return d.toISOString().split('T')[0];
+}
+function daysBetween(a, b) { return Math.round((new Date(b + 'T00:00:00') - new Date(String(a).slice(0, 10) + 'T00:00:00')) / 86400000); }
+function fmtNum(n) {
+    if (n == null || n === '') return '–';
+    return Number(n).toLocaleString('da-DK', { maximumFractionDigits: 1 });
+}
+function fmtGoalValue(n, unit) {
+    if (n == null || n === '') return '–';
+    return unit === '%' ? `${fmtNum(n)} %` : `${fmtNum(n)}${unit ? ' ' + unit : ''}`;
+}
+
+// Fremdrift 0–1 mod målværdien (virker også for mål, der skal ned, fx omkostninger)
+function goalProgress(g) {
+    if (g.target_value == null) return null;
+    const start = Number(g.start_value || 0), target = Number(g.target_value), cur = Number(g.current_value ?? start);
+    if (target === start) return cur === target ? 1 : 0;
+    return Math.max(0, Math.min(1, (cur - start) / (target - start)));
+}
+// Hvor langt vi burde være nået, hvis fremdriften var lineær fra start til deadline
+function goalExpected(g) {
+    if (!g.due_date) return null;
+    const start = (g.start_date || g.created_at || todayIso()).slice(0, 10);
+    const total = daysBetween(start, g.due_date);
+    if (total <= 0) return 1;
+    return Math.max(0, Math.min(1, daysBetween(start, todayIso()) / total));
+}
+function suggestGoalStatus(g, value) {
+    const probe = { ...g, current_value: value === '' || value == null ? g.current_value : value };
+    const p = goalProgress(probe), e = goalExpected(probe);
+    if (p == null) return null;
+    if (p >= 1) return 'done';
+    if (e == null || e === 0) return 'on_track';
+    if (p >= e - 0.05) return 'on_track';
+    if (p >= e - 0.2) return 'at_risk';
+    return 'off_track';
+}
+function goalIsStale(g) {
+    if (g.status === 'done') return false;
+    const ref = g.last_checkin || (g.created_at || '').slice(0, 10);
+    return !ref || daysBetween(ref, todayIso()) > STALE_DAYS;
+}
+function goalStatusPill(status) {
+    const s = GOAL_STATUS[status] || GOAL_STATUS.not_started;
+    return h('span', { className: `gs-pill ${s.cls}` }, s.label);
+}
+function goalProgressBar(g) {
+    const p = goalProgress(g), e = goalExpected(g);
+    const st = GOAL_STATUS[g.status] || GOAL_STATUS.not_started;
+    return h('div', { className: 'gp' },
+        h('div', { className: 'gp-track' },
+            h('i', { className: `gp-fill ${st.cls}`, style: `width:${p == null ? 0 : Math.round(p * 100)}%` }),
+            e != null && g.status !== 'done' ? h('b', { className: 'gp-mark', style: `left:${Math.round(e * 100)}%`, title: 'Forventet fremdrift i dag' }) : null
+        ),
+        h('span', { className: 'gp-pct' }, p == null ? '' : `${Math.round(p * 100)}%`)
+    );
+}
+function lastUpdateText(g) {
+    if (!g.last_checkin) return 'Aldrig opdateret';
+    const d = daysBetween(g.last_checkin, todayIso());
+    return d === 0 ? 'Opdateret i dag' : `Opdateret for ${d} dage siden`;
+}
+
+function goalCard(g, opts = {}) {
+    const stale = goalIsStale(g);
+    return h('a', { href: `#/goals/${g.id}`, className: `goal-card ${opts.compact ? 'compact' : ''}` },
+        h('div', { className: 'flex items-center gap-2 mb-2 flex-wrap' },
+            h('span', { className: `area-pill area-${g.area}` }, GOAL_AREAS[g.area] || g.area),
+            h('span', { className: 'goal-kind' }, GOAL_KIND_LABELS[g.kind] || g.kind),
+            g.owner_role ? h('span', { className: 'goal-owner' }, g.owner_role) : null,
+            h('span', { className: 'ml-auto' }, goalStatusPill(g.status))
+        ),
+        h('div', { className: 'goal-title' }, g.title),
+        g.company_name ? h('div', { className: 'text-sm text-gray-500' }, g.company_name) : null,
+        g.target_value != null ? h('div', { className: 'mt-3' },
+            goalProgressBar(g),
+            h('div', { className: 'flex justify-between text-xs text-gray-500 mt-1' },
+                h('span', {}, `${fmtGoalValue(g.current_value ?? g.start_value, g.unit)} af ${fmtGoalValue(g.target_value, g.unit)}`),
+                g.due_date ? h('span', {}, `Deadline ${formatDate(g.due_date)}`) : null)
+        ) : (g.milestones_total ? h('div', { className: 'text-xs text-gray-500 mt-3' }, `${g.milestones_done}/${g.milestones_total} milepæle nået`) : null),
+        opts.compact ? null : h('div', { className: `goal-foot ${stale ? 'stale' : ''}` },
+            h('span', {}, stale ? `⚠ ${lastUpdateText(g)}` : lastUpdateText(g)),
+            g.open_actions ? h('span', {}, `${g.open_actions} åbne aktioner`) : null),
+        !opts.compact && g.last_comment ? h('div', { className: 'goal-comment' }, `“${g.last_comment}”`) : null
+    );
+}
+
+// ─── Mål: liste ───
+async function renderGoals(container) {
+    container.innerHTML = '<div class="text-gray-400">Indlæser...</div>';
+    const goals = await api.getGoals();
+    container.innerHTML = '';
+    container.className = 'ml-64 p-8 fade-in';
+    const areaFilter = sessionStorage.getItem('goalsArea') || '';
+
+    container.appendChild(h('div', { className: 'flex justify-between items-center mb-6' },
+        h('div', {},
+            h('h1', { className: 'text-2xl font-bold text-gray-900' }, 'Mål'),
+            h('p', { className: 'text-gray-500 mt-1' }, 'Driftsmål og strategiske mål for salg & marketing, leverance og økonomi')),
+        h('button', { className: 'bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 font-medium',
+            onClick: () => showGoalForm(null, { area: areaFilter || 'salg' }) }, '+ Nyt mål')
+    ));
+
+    container.appendChild(h('div', { className: 'mb-5' }, h('div', { className: 'area-tabs' },
+        ...[['', 'Alle'], ...Object.entries(GOAL_AREAS)].map(([k, v]) => h('button', {
+            className: k === areaFilter ? 'on' : '',
+            onClick: () => { sessionStorage.setItem('goalsArea', k); router(); }
+        }, `${v} · ${goals.filter(g => !k || g.area === k).length}`))
+    )));
+
+    const list = goals.filter(g => !areaFilter || g.area === areaFilter);
+    const count = st => list.filter(g => g.status === st).length;
+    const stale = list.filter(goalIsStale).length;
+    container.appendChild(h('div', { className: 'grid grid-cols-2 md:grid-cols-5 gap-3 mb-6' },
+        ...[
+            [count('on_track'), 'På sporet', 'good'], [count('at_risk'), 'I risiko', 'warn'], [count('off_track'), 'Bagud', 'bad'],
+            [stale, 'Ikke fulgt op', stale ? 'warn' : ''], [count('done'), 'Nået', 'good'],
+        ].map(([v, l, cls]) => h('div', { className: `kpi ${cls}`, style: 'cursor:default;background:#fff;box-shadow:var(--shadow)' },
+            h('div', { className: 'kpi-v' }, String(v)), h('div', { className: 'kpi-l' }, l),
+            h('div', { className: 'kpi-s' }, l === 'Ikke fulgt op' ? `> ${STALE_DAYS} dage uden status` : 'mål')))
+    ));
+
+    for (const kind of ['drift', 'strategisk']) {
+        const ks = list.filter(g => g.kind === kind);
+        container.appendChild(h('div', { className: 'flex items-baseline gap-3 mb-3 mt-2' },
+            h('h2', { className: 'text-lg font-bold text-gray-900' }, kind === 'drift' ? 'Driftsmål' : 'Strategiske mål'),
+            h('span', { className: 'text-sm text-gray-400' }, kind === 'drift'
+                ? 'Kortsigtede mål: salgstal, leveranceplaner, budgetter'
+                : 'Langsigtede retninger: position, kompetencer, måden vi arbejder på')));
+        if (ks.length === 0) {
+            container.appendChild(h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6 text-gray-400 text-sm' },
+                kind === 'drift' ? 'Ingen driftsmål endnu, fx en leveranceplan til en kunde eller et salgsmål for året.'
+                    : 'Ingen strategiske mål endnu.'));
+            continue;
+        }
+        container.appendChild(h('div', { className: 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 mb-8' }, ...ks.map(g => goalCard(g))));
+    }
+}
+
+// ─── Mål: formular ───
+async function showGoalForm(existing, defaults = {}) {
+    let companies = [];
+    try { companies = await api.getCompanies(); } catch (e) {}
+    const g = existing || { kind: 'drift', area: 'salg', start_value: 0, start_date: todayIso(), ...defaults };
+    const sel = (name, options, value) => h('select', { name, className: 'w-full border border-gray-300 rounded-lg px-3 py-2' },
+        ...Object.entries(options).map(([k, v]) => h('option', { value: k, ...(String(value ?? '') === k ? { selected: '' } : {}) }, v)));
+    const lbl = (text, el, hint) => h('div', {}, h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, text), el,
+        hint ? h('div', { className: 'text-xs text-gray-400 mt-1' }, hint) : null);
+    const roleSel = sel('owner_role', { '': 'Vælg...', ...ROLE_LABELS }, g.owner_role || AREA_ROLE[g.area]);
+
+    const form = h('form', { className: 'space-y-4', onSubmit: async (e) => {
+        e.preventDefault();
+        const fd = new FormData(e.target);
+        const num = k => fd.get(k) === '' ? null : Number(String(fd.get(k)).replace(/\./g, '').replace(',', '.'));
+        const data = {
+            title: fd.get('title'), area: fd.get('area'), kind: fd.get('kind'), owner_role: fd.get('owner_role') || null,
+            description: fd.get('description') || null, unit: fd.get('unit') || null,
+            start_value: num('start_value'), target_value: num('target_value'),
+            start_date: fd.get('start_date') || null, due_date: fd.get('due_date') || null,
+            company_id: fd.get('company_id') ? parseInt(fd.get('company_id')) : null,
+        };
+        if (!existing) data.current_value = data.start_value;
+        try {
+            const saved = existing ? await api.updateGoal(existing.id, data) : await api.createGoal(data);
+            closeModal();
+            if (existing) router(); else location.hash = `#/goals/${saved.id}`;
+        } catch (err) { alert(err.message); }
+    }},
+        lbl('Mål *', h('input', { name: 'title', required: '', value: g.title || '', className: 'w-full border border-gray-300 rounded-lg px-3 py-2', placeholder: 'Fx Sælge 150.000 målepunkter i 2027' })),
+        h('div', { className: 'grid grid-cols-3 gap-3' },
+            lbl('Type *', sel('kind', GOAL_KIND_LABELS, g.kind)),
+            lbl('Område *', (() => {
+                const s = sel('area', GOAL_AREAS, g.area);
+                s.addEventListener('change', () => { roleSel.value = AREA_ROLE[s.value]; });
+                return s;
+            })()),
+            lbl('Ansvarlig', roleSel)),
+        lbl('Hvordan måles det?', h('textarea', { name: 'description', rows: '2', className: 'w-full border border-gray-300 rounded-lg px-3 py-2',
+            placeholder: 'Fx antal målepunkter i underskrevne kontrakter' }, g.description || '')),
+        h('div', { className: 'grid grid-cols-3 gap-3' },
+            lbl('Startværdi', h('input', { name: 'start_value', value: g.start_value ?? '', className: 'w-full border border-gray-300 rounded-lg px-3 py-2' })),
+            lbl('Målværdi', h('input', { name: 'target_value', value: g.target_value ?? '', className: 'w-full border border-gray-300 rounded-lg px-3 py-2' })),
+            lbl('Enhed', h('input', { name: 'unit', value: g.unit || '', className: 'w-full border border-gray-300 rounded-lg px-3 py-2', placeholder: 'målepunkter, %, kr.' }))),
+        h('div', { className: 'grid grid-cols-2 gap-3' },
+            lbl('Start', h('input', { type: 'date', name: 'start_date', value: (g.start_date || '').slice(0, 10), className: 'w-full border border-gray-300 rounded-lg px-3 py-2' })),
+            lbl('Deadline', h('input', { type: 'date', name: 'due_date', value: (g.due_date || '').slice(0, 10), className: 'w-full border border-gray-300 rounded-lg px-3 py-2' }))),
+        lbl('Kunde (valgfri)', h('select', { name: 'company_id', className: 'w-full border border-gray-300 rounded-lg px-3 py-2' },
+            h('option', { value: '' }, 'Ingen bestemt kunde'),
+            ...companies.map(c => h('option', { value: c.id, ...(g.company_id == c.id ? { selected: '' } : {}) }, c.name))),
+            'Bruges fx til en leveranceplan for en bestemt kunde. Milepæle tilføjer du på målets side.'),
+        h('div', { className: 'flex justify-end gap-3 pt-2' },
+            h('button', { type: 'button', className: 'px-4 py-2 text-gray-600', onClick: closeModal }, 'Annuller'),
+            h('button', { type: 'submit', className: 'bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 font-medium' }, existing ? 'Gem' : 'Opret mål'))
+    );
+    showModal(existing ? 'Rediger mål' : 'Nyt mål', form, 'max-w-2xl');
+}
+
+// ─── Statusopdatering (check-in) — bruges både på målsiden og i møder ───
+function showCheckinForm(goal, meetingId, onDone) {
+    const hasTarget = goal.target_value != null;
+    const statusSel = h('select', { name: 'status', className: 'w-full border border-gray-300 rounded-lg px-3 py-2' },
+        ...Object.entries(GOAL_STATUS).filter(([k]) => k !== 'not_started').map(([k, v]) => h('option', { value: k }, v.label)));
+    const hint = h('div', { className: 'text-xs mt-1 text-gray-500' });
+    const commentBox = h('textarea', { name: 'comment', rows: '3', className: 'w-full border border-gray-300 rounded-lg px-3 py-2',
+        placeholder: 'Hvad er status, og hvad gør vi nu?' });
+    const commentHint = h('div', { className: 'text-xs mt-1 text-gray-400' });
+
+    function refresh(valueStr) {
+        const suggestion = suggestGoalStatus(goal, valueStr === '' ? null : Number(String(valueStr).replace(/\./g, '').replace(',', '.')));
+        if (suggestion) {
+            statusSel.value = suggestion;
+            const exp = goalExpected(goal);
+            hint.textContent = `Forslag ud fra fremdrift: ${GOAL_STATUS[suggestion].label}` + (exp != null ? ` (forventet ${Math.round(exp * 100)}% i dag)` : '');
+        } else {
+            statusSel.value = goal.status && goal.status !== 'not_started' ? goal.status : 'on_track';
+            hint.textContent = 'Vurdér selv status — målet har ingen målværdi.';
+        }
+        updateCommentHint();
+    }
+    function updateCommentHint() {
+        const needs = statusSel.value === 'at_risk' || statusSel.value === 'off_track';
+        commentHint.textContent = needs ? 'Påkrævet: beskriv hvad der skal ske for at komme på sporet.' : '';
+        if (needs) commentBox.setAttribute('required', ''); else commentBox.removeAttribute('required');
+    }
+    statusSel.addEventListener('change', updateCommentHint);
+
+    const valueInput = hasTarget ? h('input', { name: 'value', value: goal.current_value ?? '', className: 'w-full border border-gray-300 rounded-lg px-3 py-2',
+        onInput: (e) => refresh(e.target.value) }) : null;
+
+    const form = h('form', { className: 'space-y-4', onSubmit: async (e) => {
+        e.preventDefault();
+        const fd = new FormData(e.target);
+        const raw = fd.get('value');
+        try {
+            await api.createGoalCheckin(goal.id, {
+                meeting_id: meetingId || null,
+                value: hasTarget && raw !== '' && raw != null ? Number(String(raw).replace(/\./g, '').replace(',', '.')) : null,
+                status: fd.get('status'),
+                comment: fd.get('comment') || null,
+            });
+            closeModal();
+            if (onDone) onDone(); else router();
+        } catch (err) { alert(err.message); }
+    }},
+        h('div', { className: 'bg-gray-50 rounded-lg p-3 text-sm' },
+            h('div', { className: 'font-semibold text-gray-900' }, goal.title),
+            hasTarget ? h('div', { className: 'text-gray-500 mt-1' },
+                `Sidst: ${fmtGoalValue(goal.current_value ?? goal.start_value, goal.unit)} af ${fmtGoalValue(goal.target_value, goal.unit)}` +
+                (goal.due_date ? ` · deadline ${formatDate(goal.due_date)}` : '')) : null),
+        hasTarget ? h('div', {}, h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, `Ny værdi${goal.unit ? ' (' + goal.unit + ')' : ''}`), valueInput) : null,
+        h('div', {}, h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, 'Status'), statusSel, hint),
+        h('div', {}, h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, 'Kommentar'), commentBox, commentHint),
+        h('div', { className: 'flex justify-end gap-3 pt-2' },
+            h('button', { type: 'button', className: 'px-4 py-2 text-gray-600', onClick: closeModal }, 'Annuller'),
+            h('button', { type: 'submit', className: 'bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 font-medium' }, 'Gem status'))
+    );
+    showModal('Opdater status', form);
+    refresh(goal.current_value ?? '');
+}
+
+// ─── Mål: detalje ───
+function goalHistoryChart(g) {
+    const pts = [...(g.checkins || [])].filter(c => c.value != null).reverse();
+    if (g.target_value == null || pts.length === 0) return null;
+    const W = 1100, H = 230, P = { t: 14, r: 16, b: 28, l: 64 };
+    const start = (g.start_date || g.created_at || pts[0].checkin_date).slice(0, 10);
+    const end = (g.due_date || pts[pts.length - 1].checkin_date).slice(0, 10);
+    const span = Math.max(1, daysBetween(start, end));
+    const maxV = Math.max(Number(g.target_value), ...pts.map(p => Number(p.value)), Number(g.start_value || 0)) || 1;
+    const minV = Math.min(0, Number(g.start_value || 0), ...pts.map(p => Number(p.value)));
+    const x = d => P.l + Math.max(0, Math.min(1, daysBetween(start, d.slice(0, 10)) / span)) * (W - P.l - P.r);
+    const y = v => P.t + (1 - (v - minV) / (maxV - minV || 1)) * (H - P.t - P.b);
+    const line = pts.map(p => `${x(p.checkin_date)},${y(Number(p.value))}`).join(' ');
+    const dots = pts.map(p => `<circle cx="${x(p.checkin_date)}" cy="${y(Number(p.value))}" r="4" fill="#194b66" stroke="#fff" stroke-width="1.5"><title>${formatDate(p.checkin_date)}: ${fmtNum(p.value)}</title></circle>`).join('');
+    const svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" style="overflow:visible">
+        <line x1="${P.l}" x2="${W - P.r}" y1="${y(Number(g.target_value))}" y2="${y(Number(g.target_value))}" stroke="#2c7a4b" stroke-dasharray="4 4"/>
+        <text x="${P.l - 6}" y="${y(Number(g.target_value)) + 4}" text-anchor="end" font-size="11" fill="#2c7a4b">${fmtNum(g.target_value)}</text>
+        <line x1="${x(start)}" y1="${y(Number(g.start_value || 0))}" x2="${x(end)}" y2="${y(Number(g.target_value))}" stroke="#c3cfd8" stroke-width="1.5"/>
+        <line x1="${P.l}" x2="${W - P.r}" y1="${H - P.b}" y2="${H - P.b}" stroke="#d9e2e9"/>
+        <text x="${P.l}" y="${H - 8}" font-size="11" fill="#788a96">${formatDate(start)}</text>
+        <text x="${W - P.r}" y="${H - 8}" font-size="11" fill="#788a96" text-anchor="end">${formatDate(end)}</text>
+        <polyline points="${line}" fill="none" stroke="#194b66" stroke-width="2.5" stroke-linejoin="round"/>${dots}</svg>`;
+    return h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6' },
+        h('div', { className: 'flex items-center justify-between mb-2' },
+            h('h2', { className: 'font-semibold text-gray-900' }, 'Udvikling'),
+            h('span', { className: 'text-xs text-gray-400' }, 'Grå linje = lineær plan · stiplet = målværdi')),
+        h('div', { innerHTML: svg }));
+}
+
+async function renderGoalDetail(container, id) {
+    container.innerHTML = '<div class="text-gray-400">Indlæser...</div>';
+    const g = await api.getGoal(id);
+    container.innerHTML = '';
+    container.className = 'ml-64 p-8 fade-in';
+    const p = goalProgress(g), e = goalExpected(g);
+
+    container.appendChild(h('div', { className: 'mb-6' },
+        h('a', { href: '#/goals', className: 'text-sm text-blue-600 hover:underline mb-2 inline-block' }, '← Alle mål'),
+        h('div', { className: 'flex justify-between items-start gap-4' },
+            h('div', {},
+                h('div', { className: 'flex items-center gap-2 mb-2 flex-wrap' },
+                    h('span', { className: `area-pill area-${g.area}` }, GOAL_AREAS[g.area]),
+                    h('span', { className: 'goal-kind' }, GOAL_KIND_LABELS[g.kind]),
+                    g.owner_role ? h('span', { className: 'goal-owner' }, `Ansvarlig: ${g.owner_role}`) : null,
+                    goalStatusPill(g.status),
+                    g.archived ? h('span', { className: 'gs-pill gs-none' }, 'Arkiveret') : null),
+                h('h1', { className: 'text-2xl font-bold text-gray-900' }, g.title),
+                g.company_name ? h('a', { href: `#/companies/${g.company_id}`, className: 'text-blue-600 hover:underline' }, g.company_name) : null,
+                g.description ? h('p', { className: 'text-gray-500 mt-1 max-w-3xl' }, g.description) : null),
+            h('div', { className: 'flex gap-2 flex-shrink-0' },
+                h('button', { className: 'bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 font-medium', onClick: () => showCheckinForm(g) }, 'Opdater status'),
+                h('button', { className: 'bg-white border border-gray-300 text-gray-700 px-3 py-2 rounded-lg hover:bg-gray-50', onClick: () => showGoalForm(g) }, 'Rediger'),
+                h('button', { className: 'bg-white border border-gray-300 text-gray-700 px-3 py-2 rounded-lg hover:bg-gray-50',
+                    onClick: async () => { await api.updateGoal(g.id, { archived: !g.archived }); router(); } }, g.archived ? 'Genåbn' : 'Arkivér'),
+                h('button', { className: 'text-red-600 px-3 py-2 rounded-lg hover:bg-red-50',
+                    onClick: async () => { if (confirm(`Slet målet "${g.title}" og al dets historik?`)) { await api.deleteGoal(g.id); location.hash = '#/goals'; } } }, 'Slet'))
+        )));
+
+    const tile = (v, l, s, cls) => h('div', { className: `kpi ${cls || ''}`, style: 'cursor:default;background:#fff;box-shadow:var(--shadow)' },
+        h('div', { className: 'kpi-v' }, v), h('div', { className: 'kpi-l' }, l), h('div', { className: 'kpi-s' }, s));
+    // Tallet stort, enheden lille, så lange enheder som "målepunkter" ikke fylder hele feltet
+    const valueEl = (n, unit) => n == null ? '–' : h('span', {}, unit === '%' ? `${fmtNum(n)}%` : fmtNum(n),
+        unit && unit !== '%' ? h('small', {}, ` ${unit}`) : null);
+    const behind = p != null && e != null && p < e - 0.05;
+    container.appendChild(h('div', { className: 'grid grid-cols-2 md:grid-cols-5 gap-3 mb-6' },
+        tile(valueEl(g.current_value ?? g.start_value, g.unit), 'Nu', lastUpdateText(g), goalIsStale(g) ? 'warn' : ''),
+        tile(valueEl(g.target_value, g.unit), 'Mål', g.start_value != null ? `fra ${fmtGoalValue(g.start_value, g.unit)}` : ''),
+        tile(p == null ? '–' : `${Math.round(p * 100)}%`, 'Fremdrift', 'af målet', behind ? 'bad' : (p != null ? 'good' : '')),
+        tile(e == null ? '–' : `${Math.round(e * 100)}%`, 'Forventet', 'ved lineær plan'),
+        tile(g.due_date ? formatDate(g.due_date) : '–', 'Deadline', g.due_date ? `${Math.max(0, daysBetween(todayIso(), g.due_date))} dage tilbage` : 'ingen deadline')
+    ));
+
+    const chart = goalHistoryChart(g);
+    if (chart) container.appendChild(chart);
+
+    // Milepæle
+    const ms = h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6' },
+        h('h2', { className: 'font-semibold text-gray-900 mb-3' }, `Milepæle${g.milestones.length ? ` · ${g.milestones.filter(m => m.done).length}/${g.milestones.length}` : ''}`));
+    for (const m of g.milestones) {
+        const late = !m.done && m.due_date && m.due_date < todayIso();
+        ms.appendChild(h('div', { className: 'flex items-center gap-3 py-2 border-b border-gray-100' },
+            h('input', { type: 'checkbox', ...(m.done ? { checked: '' } : {}), className: 'w-4 h-4',
+                onChange: async (ev) => { await api.updateMilestone(m.id, { done: ev.target.checked }); router(); } }),
+            h('span', { className: `flex-1 ${m.done ? 'line-through text-gray-400' : 'text-gray-800'}` }, m.title),
+            m.due_date ? h('span', { className: `text-sm ${late ? 'text-red-600 font-medium' : 'text-gray-400'}` }, formatDate(m.due_date)) : null,
+            h('button', { className: 'text-gray-300 hover:text-red-500 text-lg', title: 'Slet milepæl',
+                onClick: async () => { if (confirm('Slet milepæl?')) { await api.deleteMilestone(m.id); router(); } } }, '×')));
+    }
+    const msForm = h('form', { className: 'flex gap-2 mt-3', onSubmit: async (ev) => {
+        ev.preventDefault();
+        const fd = new FormData(ev.target);
+        await api.createMilestone(g.id, { title: fd.get('title'), due_date: fd.get('due_date') || null });
+        router();
+    }},
+        h('input', { name: 'title', required: '', placeholder: 'Ny milepæl, fx "Go-live hos kunden"', className: 'flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm' }),
+        h('input', { type: 'date', name: 'due_date', className: 'border border-gray-300 rounded-lg px-3 py-2 text-sm' }),
+        h('button', { type: 'submit', className: 'bg-white border border-gray-300 px-3 py-2 rounded-lg text-sm hover:bg-gray-50' }, 'Tilføj'));
+    ms.appendChild(msForm);
+
+    // Aktioner knyttet til målet
+    const acts = h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6' },
+        h('h2', { className: 'font-semibold text-gray-900 mb-3' }, 'Aktioner & beslutninger'));
+    if (g.actions.length === 0) acts.appendChild(h('div', { className: 'text-sm text-gray-400' }, 'Ingen endnu. Aktioner oprettes typisk på ledermødet.'));
+    for (const a of g.actions) acts.appendChild(actionRow(a, { onChange: () => router() }));
+
+    container.appendChild(h('div', { className: 'grid grid-cols-1 lg:grid-cols-2 gap-6' }, ms, acts));
+
+    // Historik
+    const hist = h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6' },
+        h('h2', { className: 'font-semibold text-gray-900 mb-3' }, 'Statushistorik'));
+    if (g.checkins.length === 0) hist.appendChild(h('div', { className: 'text-sm text-gray-400' }, 'Ingen statusopdateringer endnu.'));
+    for (const c of g.checkins) {
+        hist.appendChild(h('div', { className: 'flex gap-4 py-3 border-b border-gray-100' },
+            h('div', { className: 'w-28 flex-shrink-0 text-sm text-gray-500' }, formatDate(c.checkin_date)),
+            h('div', { className: 'w-28 flex-shrink-0' }, goalStatusPill(c.status)),
+            h('div', { className: 'w-32 flex-shrink-0 text-sm font-semibold text-gray-800' }, c.value != null ? fmtGoalValue(c.value, g.unit) : ''),
+            h('div', { className: 'flex-1 text-sm text-gray-700' }, c.comment || '',
+                h('div', { className: 'text-xs text-gray-400 mt-0.5' }, [c.user_name, c.meeting_title ? `på mødet "${c.meeting_title}"` : null].filter(Boolean).join(' · ')))));
+    }
+    container.appendChild(hist);
+}
+
+// ─── Aktioner ───
+function actionRow(a, { meetingId = null, onChange, showCarry = false, carried = false, onCarry } = {}) {
+    const late = a.status === 'open' && a.due_date && a.due_date < todayIso();
+    const row = h('div', { className: `action-row ${a.status === 'done' ? 'done' : ''} ${late ? 'late' : ''}` },
+        h('span', { className: `act-kind ${a.kind}` }, a.kind === 'beslutning' ? 'Beslutning' : 'Aktion'),
+        h('div', { className: 'flex-1 min-w-0' },
+            h('div', { className: 'act-title' }, a.title),
+            h('div', { className: 'text-xs text-gray-500 mt-0.5' }, [
+                a.owner ? `Ansvarlig: ${a.owner}` : (a.kind === 'aktion' ? '⚠ Ingen ansvarlig' : null),
+                a.due_date ? `Frist ${formatDate(a.due_date)}` : (a.kind === 'aktion' ? '⚠ Ingen frist' : null),
+                a.goal_title ? `Mål: ${a.goal_title}` : null,
+                a.company_name ? a.company_name : null,
+                a.meeting_date ? `fra møde ${formatDate(a.meeting_date)}` : null,
+            ].filter(Boolean).join(' · '))),
+        a.kind === 'aktion' ? h('div', { className: 'flex gap-2 flex-shrink-0 items-center' },
+            showCarry && a.status === 'open' ? (carried
+                ? h('span', { className: 'text-xs text-gray-500' }, '↻ Fortsætter')
+                : h('button', { className: 'act-btn', onClick: onCarry }, 'Fortsætter')) : null,
+            showCarry && a.status === 'open' ? h('button', { className: 'act-btn', onClick: async () => {
+                const d = prompt('Ny frist (ÅÅÅÅ-MM-DD):', a.due_date || addDaysIso(14));
+                if (d) { await api.updateAction(a.id, { due_date: d }); if (onCarry) onCarry(); else if (onChange) onChange(); }
+            } }, 'Ny frist') : null,
+            h('button', { className: `act-btn ${a.status === 'done' ? '' : 'primary'}`, onClick: async () => {
+                await api.updateAction(a.id, { status: a.status === 'done' ? 'open' : 'done', closed_in_meeting_id: meetingId });
+                onChange && onChange();
+            } }, a.status === 'done' ? 'Genåbn' : 'Udført')
+        ) : null
+    );
+    return row;
+}
+
+// ─── Ledermøder: oversigt ───
+async function renderMeetings(container) {
+    container.innerHTML = '<div class="text-gray-400">Indlæser...</div>';
+    const [ov, meetings] = await Promise.all([api.getCeoOverview(), api.getMeetings()]);
+    container.innerHTML = '';
+    container.className = 'ml-64 p-8 fade-in';
+
+    container.appendChild(h('div', { className: 'mb-6' },
+        h('h1', { className: 'text-2xl font-bold text-gray-900' }, 'Ledermøder'),
+        h('p', { className: 'text-gray-500 mt-1' }, 'Faste opfølgningsmøder med CCO, COO og CFO, med samme dagsorden hver gang, så intet bliver glemt')));
+
+    const grid = h('div', { className: 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 mb-8' });
+    for (const area of Object.keys(GOAL_AREAS)) {
+        const goals = ov.goals.filter(g => area === 'tvaers' ? (g.area === 'tvaers' || g.kind === 'strategisk') : g.area === area);
+        const acts = ov.open_actions.filter(a => area === 'tvaers' || a.area === area);
+        const last = ov.last_meetings.find(m => m.area === area && m.status === 'done') || null;
+        const planned = ov.planned_meetings.find(m => m.area === area) || null;
+        const red = goals.filter(g => g.status === 'off_track').length, amber = goals.filter(g => g.status === 'at_risk').length;
+        const stale = goals.filter(goalIsStale).length;
+        const lateActs = acts.filter(a => a.due_date && a.due_date < todayIso()).length;
+        const sinceLast = last ? daysBetween(last.meeting_date, todayIso()) : null;
+
+        grid.appendChild(h('div', { className: 'meet-card' },
+            h('div', { className: 'meet-card-head', style: `--ac:var(--area-${area}, var(--accent))` },
+                h('span', { className: 'meet-role' }, AREA_ROLE[area]),
+                h('div', {}, h('div', { className: 'font-bold text-gray-900' }, MEETING_TITLES[area]),
+                    h('div', { className: 'text-xs text-gray-500' }, last ? `Sidst holdt ${formatDate(last.meeting_date)} (${sinceLast === 0 ? 'i dag' : sinceLast + ' dage siden'})` : 'Ikke holdt endnu'))),
+            h('div', { className: 'meet-stats' },
+                h('div', {}, h('b', {}, String(goals.length)), 'mål'),
+                h('div', { className: red ? 'bad' : amber ? 'warn' : '' }, h('b', {}, String(red + amber)), 'i risiko/bagud'),
+                h('div', { className: stale ? 'warn' : '' }, h('b', {}, String(stale)), 'ikke fulgt op'),
+                h('div', { className: lateActs ? 'bad' : '' }, h('b', {}, String(acts.length)), `åbne aktioner${lateActs ? ` (${lateActs} over frist)` : ''}`)),
+            planned
+                ? h('a', { href: `#/meetings/${planned.id}`, className: 'meet-btn primary' }, planned.status === 'in_progress' ? 'Fortsæt mødet' : `Planlagt ${formatDate(planned.meeting_date)} · Åbn`)
+                : h('button', { className: 'meet-btn primary', onClick: async () => {
+                    const m = await api.createMeeting({ area, title: MEETING_TITLES[area], meeting_date: todayIso(),
+                        participants: area === 'tvaers' ? 'CEO, CCO, COO, CFO' : `CEO, ${AREA_ROLE[area]}` });
+                    location.hash = `#/meetings/${m.id}`;
+                } }, 'Start møde nu'),
+            !planned ? h('button', { className: 'meet-btn', onClick: async () => {
+                const d = prompt('Dato for mødet (ÅÅÅÅ-MM-DD):', addDaysIso(7));
+                if (!d) return;
+                await api.createMeeting({ area, title: MEETING_TITLES[area], meeting_date: d,
+                    participants: area === 'tvaers' ? 'CEO, CCO, COO, CFO' : `CEO, ${AREA_ROLE[area]}` });
+                router();
+            } }, 'Planlæg møde') : null
+        ));
+    }
+    container.appendChild(grid);
+
+    container.appendChild(h('h2', { className: 'text-lg font-bold text-gray-900 mb-3' }, 'Alle møder'));
+    const list = h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden' });
+    if (meetings.length === 0) list.appendChild(h('div', { className: 'p-8 text-center text-gray-400' }, 'Ingen møder endnu. Start det første ovenfor.'));
+    const MS = { planned: ['Planlagt', 'gs-none'], in_progress: ['I gang', 'gs-warn'], done: ['Afholdt', 'gs-good'] };
+    for (const m of meetings) {
+        list.appendChild(h('a', { href: `#/meetings/${m.id}`, className: 'flex items-center gap-4 px-6 py-3 border-b border-gray-100 hover:bg-gray-50' },
+            h('div', { className: 'w-28 text-sm text-gray-500' }, formatDate(m.meeting_date)),
+            h('span', { className: `area-pill area-${m.area}` }, GOAL_AREAS[m.area]),
+            h('div', { className: 'flex-1 font-medium text-gray-900' }, m.title),
+            h('div', { className: 'text-xs text-gray-500' }, `${m.checkins_count} mål opdateret · ${m.decisions_count} beslutninger · ${m.actions_count} aktioner`),
+            h('span', { className: `gs-pill ${MS[m.status][1]}` }, MS[m.status][0])));
+    }
+    container.appendChild(list);
+}
+
+// ─── Ledermøde: guidet gennemgang ───
+const MEETING_STEPS = [
+    { key: 'prep', label: 'Forberedelse', hint: 'Deltagere, dagsorden og referat fra sidst' },
+    { key: 'actions', label: 'Aktioner fra sidst', hint: 'Er det, vi aftalte, blevet gjort?' },
+    { key: 'drift', label: 'Driftsmål', hint: 'Status og tal på de kortsigtede mål' },
+    { key: 'strategi', label: 'Strategiske mål', hint: 'Bevæger vi os i den retning, vi har valgt?' },
+    { key: 'risks', label: 'Sager & risici', hint: 'Forfaldne sager, deadlines og bekymringer' },
+    { key: 'decisions', label: 'Beslutninger & aktioner', hint: 'Hvad besluttede vi, og hvem gør hvad hvornår?' },
+    { key: 'close', label: 'Afslut & referat', hint: 'Tjek at alt er dækket, og planlæg næste møde' },
+];
+
+async function renderMeetingDetail(container, id) {
+    container.innerHTML = '<div class="text-gray-400">Indlæser...</div>';
+    let m = await api.getMeeting(id);
+    container.innerHTML = '';
+    container.className = 'ml-64 p-8 fade-in';
+    const notes = Object.assign({ step_notes: {}, carried: [], visited: [] }, m.notes || {});
+    const stepKey = `meetingStep_${id}`;
+    let step = parseInt(sessionStorage.getItem(stepKey) || (m.status === 'done' ? '6' : '0'));
+
+    async function saveNotes() { await api.updateMeeting(id, { notes }); }
+    async function reload() { m = await api.getMeeting(id); draw(); }
+
+    const goalsOf = kind => m.goals.filter(g => g.kind === kind);
+    function progress() {
+        const fu = m.followup_actions.filter(a => a.kind === 'aktion');
+        const fuDone = fu.filter(a => a.status === 'done' || notes.carried.includes(a.id)).length;
+        const d = goalsOf('drift'), s = goalsOf('strategisk');
+        return {
+            actions: [fuDone, fu.length],
+            drift: [d.filter(g => g.meeting_checkin).length, d.length],
+            strategi: [s.filter(g => g.meeting_checkin).length, s.length],
+            risks: [notes.visited.includes('risks') ? 1 : 0, 1],
+            decisions: [m.new_items.length ? 1 : 0, 1],
+        };
+    }
+    function stepDone(key) {
+        const pr = progress();
+        if (key === 'prep') return m.status !== 'planned';
+        if (key === 'close') return m.status === 'done';
+        const [a, b] = pr[key];
+        return b === 0 ? notes.visited.includes(key) : a >= b;
+    }
+
+    function draw() {
+        container.innerHTML = '';
+        const isDone = m.status === 'done';
+        container.appendChild(h('div', { className: 'mb-5' },
+            h('a', { href: '#/meetings', className: 'text-sm text-blue-600 hover:underline mb-2 inline-block' }, '← Ledermøder'),
+            h('div', { className: 'flex items-center gap-3 flex-wrap' },
+                h('span', { className: `area-pill area-${m.area}` }, GOAL_AREAS[m.area]),
+                h('h1', { className: 'text-2xl font-bold text-gray-900' }, m.title),
+                h('span', { className: 'text-gray-500' }, formatDate(m.meeting_date)),
+                h('span', { className: `gs-pill ${isDone ? 'gs-good' : m.status === 'in_progress' ? 'gs-warn' : 'gs-none'}` },
+                    isDone ? 'Afholdt' : m.status === 'in_progress' ? 'I gang' : 'Planlagt'),
+                h('button', { className: 'ml-auto text-sm text-red-600 hover:underline', onClick: async () => {
+                    if (confirm('Slet mødet? Statusopdateringer og aktioner bevares, men mister koblingen til mødet.')) { await api.deleteMeeting(id); location.hash = '#/meetings'; }
+                } }, 'Slet møde'))));
+
+        const layout = h('div', { className: 'meeting-layout' });
+        const stepper = h('div', { className: 'meeting-steps' });
+        const pr = progress();
+        MEETING_STEPS.forEach((s, i) => {
+            const counts = pr[s.key];
+            stepper.appendChild(h('button', { className: `mstep ${i === step ? 'on' : ''} ${stepDone(s.key) ? 'ok' : ''}`,
+                onClick: () => go(i) },
+                h('span', { className: 'mstep-n' }, stepDone(s.key) ? '✓' : String(i + 1)),
+                h('span', { className: 'mstep-txt' }, h('b', {}, s.label),
+                    h('small', {}, counts && counts[1] > 1 ? `${counts[0]} af ${counts[1]}` : s.hint))));
+        });
+        layout.appendChild(stepper);
+
+        const body = h('div', { className: 'meeting-body' });
+        const S = MEETING_STEPS[step];
+        body.appendChild(h('div', { className: 'mb-4' },
+            h('div', { className: 'text-xs font-bold uppercase tracking-wider text-gray-400' }, `Punkt ${step + 1} af ${MEETING_STEPS.length}`),
+            h('h2', { className: 'text-xl font-bold text-gray-900' }, S.label),
+            h('p', { className: 'text-gray-500' }, S.hint)));
+        body.appendChild(STEP_RENDER[S.key]());
+
+        if (!['prep', 'close'].includes(S.key)) {
+            const ta = h('textarea', { rows: '3', className: 'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm', placeholder: 'Noter til dette punkt (kommer med i referatet)' },
+                notes.step_notes[S.key] || '');
+            ta.addEventListener('blur', async () => { notes.step_notes[S.key] = ta.value; await saveNotes(); });
+            body.appendChild(h('div', { className: 'mt-6' }, h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, 'Noter'), ta));
+        }
+        body.appendChild(h('div', { className: 'flex justify-between mt-6 pt-4 border-t border-gray-100' },
+            step > 0 ? h('button', { className: 'px-4 py-2 text-gray-600 hover:text-gray-900', onClick: () => go(step - 1) }, '← Forrige') : h('span', {}),
+            step < MEETING_STEPS.length - 1 ? h('button', { className: 'bg-blue-600 text-white px-5 py-2 rounded-lg hover:bg-blue-700 font-medium',
+                onClick: () => go(step + 1) }, `Næste: ${MEETING_STEPS[step + 1].label} →`) : h('span', {})));
+        layout.appendChild(body);
+        container.appendChild(layout);
+    }
+
+    async function go(i) {
+        const key = MEETING_STEPS[step].key;
+        if (!notes.visited.includes(key)) { notes.visited.push(key); await saveNotes(); }
+        if (m.status === 'planned' && i > 0) { await api.updateMeeting(id, { status: 'in_progress' }); m.status = 'in_progress'; }
+        step = i; sessionStorage.setItem(stepKey, String(i));
+        window.scrollTo(0, 0);
+        draw();
+    }
+
+    function goalReviewList(kind) {
+        const list = goalsOf(kind);
+        const wrap = h('div', { className: 'space-y-3' });
+        if (list.length === 0) {
+            wrap.appendChild(h('div', { className: 'empty-box' },
+                kind === 'drift' ? 'Der er ingen driftsmål for området endnu.' : 'Der er ingen strategiske mål for området endnu.',
+                h('button', { className: 'act-btn primary ml-3', onClick: () => showGoalForm(null, { area: m.area === 'tvaers' ? 'tvaers' : m.area, kind }) }, '+ Opret mål')));
+            return wrap;
+        }
+        for (const g of list) {
+            const ci = g.meeting_checkin;
+            wrap.appendChild(h('div', { className: `review-goal ${ci ? 'ok' : ''}` },
+                h('div', { className: 'flex-1 min-w-0' },
+                    h('div', { className: 'flex items-center gap-2 flex-wrap mb-1' },
+                        m.area === 'tvaers' ? h('span', { className: `area-pill area-${g.area}` }, GOAL_AREAS[g.area]) : null,
+                        g.owner_role ? h('span', { className: 'goal-owner' }, g.owner_role) : null,
+                        goalStatusPill(g.status),
+                        goalIsStale(g) && !ci ? h('span', { className: 'text-xs text-yellow-700' }, `⚠ ${lastUpdateText(g)}`) : null),
+                    h('a', { href: `#/goals/${g.id}`, className: 'font-semibold text-gray-900 hover:underline' }, g.title),
+                    g.company_name ? h('div', { className: 'text-sm text-gray-500' }, g.company_name) : null,
+                    g.target_value != null ? h('div', { className: 'mt-2 max-w-md' }, goalProgressBar(g),
+                        h('div', { className: 'text-xs text-gray-500 mt-1' }, `${fmtGoalValue(g.current_value ?? g.start_value, g.unit)} af ${fmtGoalValue(g.target_value, g.unit)}${g.due_date ? ' · deadline ' + formatDate(g.due_date) : ''}`)) : null,
+                    g.milestones_total ? h('div', { className: 'text-xs text-gray-500 mt-1' }, `Milepæle: ${g.milestones_done}/${g.milestones_total}`) : null,
+                    ci ? h('div', { className: 'text-sm text-gray-700 mt-2' }, `✓ Opdateret på mødet${ci.comment ? ': ' + ci.comment : ''}`)
+                       : (g.last_comment ? h('div', { className: 'goal-comment' }, `Sidst: “${g.last_comment}”`) : null)),
+                h('div', { className: 'flex flex-col gap-2 flex-shrink-0' },
+                    h('button', { className: `act-btn ${ci ? '' : 'primary'}`, onClick: () => showCheckinForm(g, id, reload) }, ci ? 'Opdater igen' : 'Opdater status'),
+                    h('button', { className: 'act-btn', onClick: () => showActionForm({ area: g.area, goal_id: g.id, owner: g.owner_role }, reload) }, '+ Aktion'))));
+        }
+        return wrap;
+    }
+
+    function showActionForm(defaults, after) {
+        const form = h('form', { className: 'space-y-4', onSubmit: async (e) => {
+            e.preventDefault();
+            const fd = new FormData(e.target);
+            await api.createAction({
+                meeting_id: id, area: defaults.area || (m.area === 'tvaers' ? 'tvaers' : m.area), kind: fd.get('kind'),
+                title: fd.get('title'), owner: fd.get('owner') || null, due_date: fd.get('due_date') || null,
+                goal_id: fd.get('goal_id') ? parseInt(fd.get('goal_id')) : null, company_id: defaults.company_id || null,
+            });
+            closeModal(); after && after();
+        }},
+            h('div', { className: 'flex gap-4' }, ...[['aktion', 'Aktion (nogen skal gøre noget)'], ['beslutning', 'Beslutning']].map(([k, v]) =>
+                h('label', { className: 'flex items-center gap-2 text-sm' }, h('input', { type: 'radio', name: 'kind', value: k, ...((defaults.kind || 'aktion') === k ? { checked: '' } : {}) }), v))),
+            formField('Hvad *', 'title', defaults.title || '', 'text', true),
+            h('div', { className: 'grid grid-cols-2 gap-3' },
+                h('div', {}, h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, 'Ansvarlig'),
+                    h('input', { name: 'owner', value: defaults.owner || AREA_ROLE[m.area] || '', list: 'owner-options', className: 'w-full border border-gray-300 rounded-lg px-3 py-2' }),
+                    h('datalist', { id: 'owner-options' }, ...['CEO', 'CCO', 'COO', 'CFO'].map(r => h('option', { value: r })))),
+                formField('Frist', 'due_date', defaults.due_date || addDaysIso(14), 'date')),
+            h('div', {}, h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, 'Knyt til mål'),
+                h('select', { name: 'goal_id', className: 'w-full border border-gray-300 rounded-lg px-3 py-2' },
+                    h('option', { value: '' }, 'Intet mål'),
+                    ...m.goals.map(g => h('option', { value: g.id, ...(defaults.goal_id == g.id ? { selected: '' } : {}) }, g.title)))),
+            h('div', { className: 'flex justify-end gap-3 pt-2' },
+                h('button', { type: 'button', className: 'px-4 py-2 text-gray-600', onClick: closeModal }, 'Annuller'),
+                h('button', { type: 'submit', className: 'bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 font-medium' }, 'Tilføj'))
+        );
+        showModal('Ny aktion eller beslutning', form);
+    }
+
+    function buildMinutes() {
+        const L = [];
+        L.push(`REFERAT · ${m.title}`, `Dato: ${formatDate(m.meeting_date)}`, `Deltagere: ${m.participants || '-'}`, '');
+        const fu = m.followup_actions.filter(a => a.kind === 'aktion');
+        if (fu.length) {
+            L.push('1. AKTIONER FRA SIDST');
+            for (const a of fu) L.push(`   [${a.status === 'done' ? 'Udført' : notes.carried.includes(a.id) ? 'Fortsætter' : 'Åben'}] ${a.title}${a.owner ? ' – ' + a.owner : ''}${a.due_date ? ' (frist ' + formatDate(a.due_date) + ')' : ''}`);
+            if (notes.step_notes.actions) L.push(`   Noter: ${notes.step_notes.actions}`);
+            L.push('');
+        }
+        for (const [kind, title, key] of [['drift', '2. DRIFTSMÅL', 'drift'], ['strategisk', '3. STRATEGISKE MÅL', 'strategi']]) {
+            const gs = goalsOf(kind);
+            if (!gs.length) continue;
+            L.push(title);
+            for (const g of gs) {
+                const st = GOAL_STATUS[g.status]?.label || '';
+                const val = g.target_value != null ? ` – ${fmtGoalValue(g.current_value ?? g.start_value, g.unit)} af ${fmtGoalValue(g.target_value, g.unit)}` : '';
+                L.push(`   [${st}] ${g.title}${val}${g.owner_role ? ' (' + g.owner_role + ')' : ''}`);
+                if (g.meeting_checkin?.comment) L.push(`      ${g.meeting_checkin.comment}`);
+                if (!g.meeting_checkin) L.push('      (ikke opdateret på mødet)');
+            }
+            if (notes.step_notes[key]) L.push(`   Noter: ${notes.step_notes[key]}`);
+            L.push('');
+        }
+        if (notes.step_notes.risks) L.push('4. SAGER & RISICI', `   ${notes.step_notes.risks}`, '');
+        const dec = m.new_items.filter(a => a.kind === 'beslutning'), act = m.new_items.filter(a => a.kind === 'aktion');
+        L.push('5. BESLUTNINGER');
+        L.push(...(dec.length ? dec.map(a => `   • ${a.title}`) : ['   Ingen']));
+        L.push('', 'NYE AKTIONER');
+        L.push(...(act.length ? act.map(a => `   • ${a.title} – ${a.owner || 'ingen ansvarlig'}, frist ${a.due_date ? formatDate(a.due_date) : 'ingen'}`) : ['   Ingen']));
+        if (notes.step_notes.decisions) L.push(`   Noter: ${notes.step_notes.decisions}`);
+        if (m.summary) L.push('', 'OPSUMMERING', m.summary);
+        if (m.next_meeting_date) L.push('', `Næste møde: ${formatDate(m.next_meeting_date)}`);
+        return L.join('\n');
+    }
+
+    const STEP_RENDER = {
+        prep: () => {
+            const w = h('div', { className: 'space-y-4' });
+            const partInput = h('input', { value: m.participants || '', className: 'w-full border border-gray-300 rounded-lg px-3 py-2' });
+            partInput.addEventListener('blur', async () => { await api.updateMeeting(id, { participants: partInput.value }); m.participants = partInput.value; });
+            const dateInput = h('input', { type: 'date', value: (m.meeting_date || '').slice(0, 10), className: 'border border-gray-300 rounded-lg px-3 py-2' });
+            dateInput.addEventListener('change', async () => { await api.updateMeeting(id, { meeting_date: dateInput.value }); m.meeting_date = dateInput.value; });
+            w.appendChild(h('div', { className: 'grid grid-cols-3 gap-3' },
+                h('div', { className: 'col-span-2' }, h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, 'Deltagere'), partInput),
+                h('div', {}, h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, 'Dato'), dateInput)));
+            const pr = progress();
+            w.appendChild(h('div', { className: 'prep-agenda' },
+                h('div', { className: 'font-semibold text-gray-900 mb-2' }, 'Dagsorden'),
+                ...MEETING_STEPS.slice(1).map((s, i) => h('div', { className: 'flex justify-between py-1.5 border-b border-gray-100 text-sm' },
+                    h('span', {}, `${i + 1}. ${s.label}`),
+                    h('span', { className: 'text-gray-500' }, {
+                        actions: `${pr.actions[1]} åbne aktioner`, drift: `${pr.drift[1]} driftsmål`, strategi: `${pr.strategi[1]} strategiske mål`,
+                        risks: `${m.risk_tasks.length} sager · ${m.risk_tenders.length} tilbud`, decisions: '', close: '' }[s.key] || '')))));
+            if (m.previous) {
+                w.appendChild(h('div', { className: 'prep-prev' },
+                    h('div', { className: 'flex justify-between mb-1' }, h('b', {}, `Sidste møde: ${formatDate(m.previous.meeting_date)}`),
+                        h('a', { href: `#/meetings/${m.previous.id}`, className: 'text-sm text-blue-600 hover:underline' }, 'Åbn referat')),
+                    h('div', { className: 'text-sm text-gray-600 whitespace-pre-wrap' }, m.previous.summary || 'Ingen opsummering skrevet.')));
+            }
+            if (m.status === 'planned') {
+                w.appendChild(h('button', { className: 'bg-blue-600 text-white px-5 py-2.5 rounded-lg hover:bg-blue-700 font-semibold',
+                    onClick: () => go(1) }, 'Start mødet →'));
+            }
+            return w;
+        },
+        actions: () => {
+            const fu = m.followup_actions;
+            const w = h('div', { className: 'space-y-2' });
+            if (fu.length === 0) w.appendChild(h('div', { className: 'empty-box' }, 'Ingen åbne aktioner fra tidligere møder.'));
+            for (const a of fu) w.appendChild(actionRow(a, { meetingId: id, onChange: reload, showCarry: true, carried: notes.carried.includes(a.id),
+                onCarry: async () => { if (!notes.carried.includes(a.id)) notes.carried.push(a.id); await saveNotes(); await reload(); } }));
+            return w;
+        },
+        drift: () => goalReviewList('drift'),
+        strategi: () => goalReviewList('strategisk'),
+        risks: () => {
+            if (!notes.visited.includes('risks')) { notes.visited.push('risks'); saveNotes(); }
+            const w = h('div', { className: 'space-y-5' });
+            const tl = h('div', {}, h('div', { className: 'font-semibold text-gray-900 mb-2' }, `Sager over frist eller med høj prioritet (${m.risk_tasks.length})`));
+            if (!m.risk_tasks.length) tl.appendChild(h('div', { className: 'empty-box' }, 'Ingen. Godt.'));
+            for (const t of m.risk_tasks) {
+                const late = t.due_date && t.due_date < todayIso();
+                tl.appendChild(h('div', { className: 'risk-row' },
+                    h('div', { className: 'flex-1 min-w-0' },
+                        h('a', { href: `#/companies/${t.company_id}`, className: 'font-semibold text-gray-900 hover:underline' }, t.company_name),
+                        h('div', { className: 'text-sm text-gray-600' }, h('a', { href: `#/tasks/${t.id}`, className: 'hover:underline' }, t.title),
+                            t.assigned_to_name ? ` · ${t.assigned_to_name}` : '')),
+                    h('span', { className: `text-sm ${late ? 'text-red-600 font-medium' : 'text-yellow-700'}` }, late ? `${daysBetween(t.due_date, todayIso())}d over frist` : 'Høj prioritet'),
+                    h('button', { className: 'act-btn', onClick: () => showActionForm({ area: t.area, company_id: t.company_id, title: `${t.company_name}: ${t.title}` }, reload) }, '+ Aktion')));
+            }
+            w.appendChild(tl);
+            if (m.risk_tenders.length) {
+                const tt = h('div', {}, h('div', { className: 'font-semibold text-gray-900 mb-2' }, `Tilbud med deadline inden for 14 dage (${m.risk_tenders.length})`));
+                for (const t of m.risk_tenders) {
+                    const late = t.deadline < todayIso();
+                    tt.appendChild(h('div', { className: 'risk-row' },
+                        h('div', { className: 'flex-1 min-w-0' },
+                            h('a', { href: `#/tenders/${t.id}`, className: 'font-semibold text-gray-900 hover:underline' }, t.company_name),
+                            h('div', { className: 'text-sm text-gray-600' }, t.title)),
+                        h('span', { className: `text-sm ${late ? 'text-red-600 font-medium' : 'text-gray-500'}` }, late ? `${daysBetween(t.deadline, todayIso())}d over deadline` : formatDate(t.deadline)),
+                        h('button', { className: 'act-btn', onClick: () => showActionForm({ area: 'salg', company_id: t.company_id, title: `${t.company_name}: ${t.title}` }, reload) }, '+ Aktion')));
+                }
+                w.appendChild(tt);
+            }
+            return w;
+        },
+        decisions: () => {
+            const w = h('div', { className: 'space-y-2' });
+            w.appendChild(h('div', { className: 'flex gap-2 mb-2' },
+                h('button', { className: 'act-btn primary', onClick: () => showActionForm({ kind: 'beslutning' }, reload) }, '+ Beslutning'),
+                h('button', { className: 'act-btn primary', onClick: () => showActionForm({ kind: 'aktion' }, reload) }, '+ Aktion')));
+            if (!m.new_items.length) w.appendChild(h('div', { className: 'empty-box' }, 'Ingen beslutninger eller aktioner fra dette møde endnu.'));
+            for (const a of m.new_items) {
+                const row = actionRow(a, { meetingId: id, onChange: reload });
+                row.appendChild(h('button', { className: 'text-gray-300 hover:text-red-500 text-lg ml-2', title: 'Slet',
+                    onClick: async () => { await api.deleteAction(a.id); reload(); } }, '×'));
+                w.appendChild(row);
+            }
+            return w;
+        },
+        close: () => {
+            const pr = progress();
+            const fuOpen = m.followup_actions.filter(a => a.kind === 'aktion' && a.status === 'open' && !notes.carried.includes(a.id));
+            const missingOwner = m.new_items.filter(a => a.kind === 'aktion' && (!a.owner || !a.due_date));
+            const notChecked = m.goals.filter(g => !g.meeting_checkin);
+            const checks = [
+                [pr.actions[0] >= pr.actions[1], `Aktioner fra sidst gennemgået (${pr.actions[0]}/${pr.actions[1]})`, fuOpen.map(a => a.title), 1],
+                [pr.drift[0] >= pr.drift[1], `Driftsmål opdateret (${pr.drift[0]}/${pr.drift[1]})`, notChecked.filter(g => g.kind === 'drift').map(g => g.title), 2],
+                [pr.strategi[0] >= pr.strategi[1], `Strategiske mål opdateret (${pr.strategi[0]}/${pr.strategi[1]})`, notChecked.filter(g => g.kind === 'strategisk').map(g => g.title), 3],
+                [notes.visited.includes('risks'), 'Sager & risici gennemgået', [], 4],
+                [missingOwner.length === 0, 'Alle nye aktioner har ansvarlig og frist', missingOwner.map(a => a.title), 5],
+            ];
+            const w = h('div', { className: 'space-y-5' });
+            w.appendChild(h('div', { className: 'checklist' }, ...checks.map(([ok, label, items, stepIdx]) => h('div', { className: `check ${ok ? 'ok' : ''}` },
+                h('span', { className: 'check-ic' }, ok ? '✓' : '!'),
+                h('div', { className: 'flex-1' }, h('div', {}, label),
+                    !ok && items.length ? h('div', { className: 'text-xs text-gray-500 mt-0.5' }, items.slice(0, 4).join(' · ') + (items.length > 4 ? ' …' : '')) : null),
+                !ok ? h('button', { className: 'act-btn', onClick: () => go(stepIdx) }, 'Gå til') : null))));
+
+            const summary = h('textarea', { rows: '3', className: 'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm', placeholder: 'De vigtigste pointer fra mødet' }, m.summary || '');
+            summary.addEventListener('blur', async () => { await api.updateMeeting(id, { summary: summary.value }); m.summary = summary.value; });
+            const nextDate = h('input', { type: 'date', value: (m.next_meeting_date || addDaysIso(14, (m.meeting_date || todayIso()).slice(0, 10))).slice(0, 10), className: 'border border-gray-300 rounded-lg px-3 py-2' });
+            w.appendChild(h('div', { className: 'grid grid-cols-1 md:grid-cols-3 gap-4' },
+                h('div', { className: 'md:col-span-2' }, h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, 'Opsummering'), summary),
+                h('div', {}, h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, 'Næste møde'), nextDate,
+                    h('div', { className: 'text-xs text-gray-400 mt-1' }, 'Mødet bliver planlagt automatisk'))));
+
+            const allOk = checks.every(c => c[0]);
+            if (m.status !== 'done') {
+                w.appendChild(h('div', { className: 'flex items-center gap-3' },
+                    h('button', { className: 'bg-blue-600 text-white px-5 py-2.5 rounded-lg hover:bg-blue-700 font-semibold', onClick: async () => {
+                        if (!allOk && !confirm('Ikke alle punkter er dækket. Vil du afslutte mødet alligevel?')) return;
+                        await api.updateMeeting(id, { status: 'done', summary: summary.value, next_meeting_date: nextDate.value || null });
+                        if (nextDate.value) {
+                            const existing = (await api.getMeetings({ area: m.area })).find(x => x.status !== 'done' && x.id !== id);
+                            if (!existing) await api.createMeeting({ area: m.area, title: m.title, meeting_date: nextDate.value, participants: m.participants });
+                        }
+                        await reload();
+                    } }, 'Afslut møde'),
+                    !allOk ? h('span', { className: 'text-sm text-yellow-700' }, 'Der mangler stadig punkter. Se tjeklisten.') : null));
+            }
+            const minutes = buildMinutes();
+            w.appendChild(h('div', { className: 'minutes' },
+                h('div', { className: 'flex items-center justify-between mb-2' }, h('b', {}, 'Referat'),
+                    h('div', { className: 'flex gap-2' },
+                        h('button', { className: 'act-btn', onClick: async (e) => { await navigator.clipboard.writeText(buildMinutes()); e.target.textContent = 'Kopieret ✓'; } }, 'Kopiér'),
+                        h('button', { className: 'act-btn', onClick: () => {
+                            const win = window.open('', '_blank');
+                            if (!win) return;
+                            win.document.write(`<title>${m.title} ${m.meeting_date}</title><pre style="font:14px/1.5 'Schibsted Grotesk',system-ui,sans-serif;white-space:pre-wrap;padding:32px">${buildMinutes().replace(/</g, '&lt;')}</pre>`);
+                            win.document.close(); win.print();
+                        } }, 'Print'))),
+                h('pre', {}, minutes)));
+            return w;
+        },
+    };
+
+    draw();
+}
+
+
+// Overblik: mål og ledermøder pr. område
+function renderGoalsStrip(ceo) {
+    const wrap = h('div', { className: 'ov-panel mb-5' });
+    wrap.appendChild(h('div', { className: 'flex items-center justify-between mb-4' },
+        h('h2', { style: 'margin:0' }, 'Mål & ledermøder'),
+        h('div', { className: 'flex gap-4 text-sm' },
+            h('a', { href: '#/goals', className: 'font-semibold text-blue-600 hover:underline' }, 'Alle mål →'),
+            h('a', { href: '#/meetings', className: 'font-semibold text-blue-600 hover:underline' }, 'Ledermøder →'))));
+    const grid = h('div', { className: 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3' });
+    for (const area of Object.keys(GOAL_AREAS)) {
+        const goals = ceo.goals.filter(g => g.area === area);
+        const by = st => goals.filter(g => g.status === st).length;
+        const stale = goals.filter(goalIsStale).length;
+        const acts = ceo.open_actions.filter(a => a.area === area && a.kind === 'aktion');
+        const late = acts.filter(a => a.due_date && a.due_date < todayIso()).length;
+        const last = ceo.last_meetings.find(m => m.area === area && m.status === 'done');
+        const next = ceo.planned_meetings.find(m => m.area === area);
+        const seg = (n, cls) => n ? h('i', { className: cls, style: `flex:${n}` }) : null;
+        grid.appendChild(h('a', { href: `#/goals`, className: 'strip-card', onClick: () => sessionStorage.setItem('goalsArea', area) },
+            h('div', { className: 'flex items-center gap-2 mb-2' },
+                h('span', { className: 'meet-role' }, AREA_ROLE[area]),
+                h('b', { className: 'text-gray-900' }, GOAL_AREAS[area]),
+                h('span', { className: 'ml-auto text-sm text-gray-500' }, `${goals.length} mål`)),
+            h('div', { className: 'rag-bar' }, goals.length ? [seg(by('on_track') + by('done'), 'gs-good'), seg(by('at_risk'), 'gs-warn'), seg(by('off_track'), 'gs-bad'), seg(by('not_started'), 'gs-none')] : h('i', { className: 'gs-none', style: 'flex:1' })),
+            h('div', { className: 'strip-facts' },
+                h('span', {}, `${by('on_track') + by('done')} på sporet`),
+                h('span', { className: by('at_risk') ? 'warn' : '' }, `${by('at_risk')} i risiko`),
+                h('span', { className: by('off_track') ? 'bad' : '' }, `${by('off_track')} bagud`)),
+            h('div', { className: 'strip-facts' },
+                h('span', { className: stale ? 'warn' : '' }, `${stale} ikke fulgt op`),
+                h('span', { className: late ? 'bad' : '' }, `${acts.length} aktioner${late ? ` (${late} over frist)` : ''}`)),
+            h('div', { className: 'text-xs text-gray-500 mt-2' },
+                next ? `Næste møde ${formatDate(next.meeting_date)}` : last ? `Sidste møde ${formatDate(last.meeting_date)} · intet planlagt` : 'Intet møde planlagt')));
+    }
+    wrap.appendChild(grid);
+
+    const strategic = ceo.goals.filter(g => g.kind === 'strategisk');
+    if (strategic.length) {
+        wrap.appendChild(h('div', { className: 'ov-label', style: 'margin:18px 0 8px' }, 'Strategiske mål'));
+        wrap.appendChild(h('div', { className: 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3' }, ...strategic.map(g => goalCard(g, { compact: true }))));
+    }
+    return wrap;
 }

@@ -212,6 +212,36 @@ export const api = {
     addTemplateSection: (templateId, data) => request(`/tender-templates/${templateId}/sections`, { method: 'POST', body: JSON.stringify(data) }),
     updateTemplateSection: (id, data) => request(`/tender-template-sections/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
     deleteTemplateSection: (id) => request(`/tender-template-sections/${id}`, { method: 'DELETE' }),
+
+    // SystemateCEO: mål, ledermøder og aktioner
+    getCeoOverview: () => request('/ceo/overview'),
+    getGoals: (params = {}) => {
+        const qs = new URLSearchParams(params).toString();
+        return request(`/goals${qs ? '?' + qs : ''}`);
+    },
+    getGoal: (id) => request(`/goals/${id}`),
+    createGoal: (data) => request('/goals', { method: 'POST', body: JSON.stringify(data) }),
+    updateGoal: (id, data) => request(`/goals/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+    deleteGoal: (id) => request(`/goals/${id}`, { method: 'DELETE' }),
+    createGoalCheckin: (id, data) => request(`/goals/${id}/checkins`, { method: 'POST', body: JSON.stringify(data) }),
+    createMilestone: (goalId, data) => request(`/goals/${goalId}/milestones`, { method: 'POST', body: JSON.stringify(data) }),
+    updateMilestone: (id, data) => request(`/milestones/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+    deleteMilestone: (id) => request(`/milestones/${id}`, { method: 'DELETE' }),
+    getMeetings: (params = {}) => {
+        const qs = new URLSearchParams(params).toString();
+        return request(`/meetings${qs ? '?' + qs : ''}`);
+    },
+    getMeeting: (id) => request(`/meetings/${id}`),
+    createMeeting: (data) => request('/meetings', { method: 'POST', body: JSON.stringify(data) }),
+    updateMeeting: (id, data) => request(`/meetings/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+    deleteMeeting: (id) => request(`/meetings/${id}`, { method: 'DELETE' }),
+    getActions: (params = {}) => {
+        const qs = new URLSearchParams(params).toString();
+        return request(`/actions${qs ? '?' + qs : ''}`);
+    },
+    createAction: (data) => request('/actions', { method: 'POST', body: JSON.stringify(data) }),
+    updateAction: (id, data) => request(`/actions/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+    deleteAction: (id) => request(`/actions/${id}`, { method: 'DELETE' }),
 };
 
 window.api = api;

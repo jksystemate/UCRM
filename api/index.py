@@ -45,6 +45,18 @@ def _json_default(obj):
         return float(obj)
     raise TypeError(f"Type {type(obj)} not serializable")
 
+SEED_GOALS = [
+    ("salg", "drift", "Sælge 150.000 målepunkter i 2027",
+     "Samlet antal solgte målepunkter i kontrakter underskrevet i 2027.",
+     "CCO", "målepunkter", 0, 150000, 0, "2027-01-01", "2027-12-31"),
+    ("salg", "strategisk", "Kendt af alle i forsynings- og energibranchen",
+     "Måles som andel af branchens selskaber, hvor vi har en god eller stærk relation.",
+     "CCO", "%", 0, 100, 0, None, "2027-12-31"),
+    ("leverance", "strategisk", "100 % AI-understøttet udvikling",
+     "Andel af udviklingsarbejdet, der foregår AI-understøttet.",
+     "COO", "%", 0, 100, 0, None, "2027-12-31"),
+]
+
 # ─── Database init ───
 def init_db():
     db = get_db()
@@ -359,6 +371,78 @@ def init_db():
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP",
             "ALTER TABLE interactions ADD COLUMN IF NOT EXISTS company_id INTEGER REFERENCES companies(id) ON DELETE CASCADE",
             "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS area TEXT DEFAULT 'salg'",
+            # SystemateCEO: mål, statusopdateringer, milepæle, ledermøder og aktioner
+            """CREATE TABLE IF NOT EXISTS goals (
+                id SERIAL PRIMARY KEY,
+                area TEXT NOT NULL DEFAULT 'salg',
+                kind TEXT NOT NULL DEFAULT 'drift',
+                title TEXT NOT NULL,
+                description TEXT,
+                owner_role TEXT,
+                company_id INTEGER REFERENCES companies(id) ON DELETE SET NULL,
+                unit TEXT,
+                start_value NUMERIC DEFAULT 0,
+                target_value NUMERIC,
+                current_value NUMERIC,
+                start_date DATE DEFAULT CURRENT_DATE,
+                due_date DATE,
+                status TEXT NOT NULL DEFAULT 'not_started',
+                last_checkin DATE,
+                archived BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS meetings (
+                id SERIAL PRIMARY KEY,
+                area TEXT NOT NULL,
+                title TEXT NOT NULL,
+                meeting_date DATE NOT NULL DEFAULT CURRENT_DATE,
+                participants TEXT,
+                status TEXT NOT NULL DEFAULT 'planned',
+                notes JSONB DEFAULT '{}'::jsonb,
+                summary TEXT,
+                next_meeting_date DATE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                completed_at TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS goal_checkins (
+                id SERIAL PRIMARY KEY,
+                goal_id INTEGER NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+                meeting_id INTEGER REFERENCES meetings(id) ON DELETE SET NULL,
+                checkin_date DATE NOT NULL DEFAULT CURRENT_DATE,
+                value NUMERIC,
+                status TEXT NOT NULL,
+                comment TEXT,
+                user_name TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS goal_milestones (
+                id SERIAL PRIMARY KEY,
+                goal_id INTEGER NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+                title TEXT NOT NULL,
+                due_date DATE,
+                done BOOLEAN DEFAULT FALSE,
+                done_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS meeting_actions (
+                id SERIAL PRIMARY KEY,
+                meeting_id INTEGER REFERENCES meetings(id) ON DELETE SET NULL,
+                area TEXT NOT NULL,
+                goal_id INTEGER REFERENCES goals(id) ON DELETE SET NULL,
+                company_id INTEGER REFERENCES companies(id) ON DELETE SET NULL,
+                kind TEXT NOT NULL DEFAULT 'aktion',
+                title TEXT NOT NULL,
+                owner TEXT,
+                due_date DATE,
+                status TEXT NOT NULL DEFAULT 'open',
+                done_at TIMESTAMP,
+                closed_in_meeting_id INTEGER REFERENCES meetings(id) ON DELETE SET NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_goal_checkins_goal ON goal_checkins(goal_id)",
+            "CREATE INDEX IF NOT EXISTS idx_goal_milestones_goal ON goal_milestones(goal_id)",
+            "CREATE INDEX IF NOT EXISTS idx_meeting_actions_area ON meeting_actions(area, status)",
         ]
         for m in migrations:
             try:
@@ -375,6 +459,14 @@ def init_db():
         cnt = db.execute("SELECT COUNT(*) AS cnt FROM companies").fetchone()["cnt"]
         if cnt == 0:
             _seed_companies(db)
+
+        # Seed: CEO-mål fra brugerens egne eksempler, kun første gang
+        if db.execute("SELECT COUNT(*) AS cnt FROM goals").fetchone()["cnt"] == 0:
+            for g in SEED_GOALS:
+                db.execute(
+                    """INSERT INTO goals (area,kind,title,description,owner_role,unit,start_value,target_value,
+                       current_value,start_date,due_date) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", g)
+            db.commit()
 
     finally:
         db.close()
@@ -958,6 +1050,8 @@ class handler(BaseHTTPRequestHandler):
     def _handle_api_get(self, path, params):
         db = get_db()
         try:
+            if self._handle_ceo(db, 'GET', path, params, None, None):
+                return
             if path == "/api/companies":
                 q = """SELECT c.*, u.name AS account_manager_name
                        FROM companies c LEFT JOIN users u ON c.account_manager_id = u.id WHERE 1=1"""
@@ -1593,6 +1687,8 @@ class handler(BaseHTTPRequestHandler):
         db = get_db()
         uid = self._get_user_id()
         try:
+            if self._handle_ceo(db, 'POST', path, {}, body, uid):
+                return
             if path == "/api/companies":
                 cur = db.execute(
                     """INSERT INTO companies (name,sector,address,city,zip_code,website,notes,rating,account_manager_id,
@@ -2032,6 +2128,8 @@ class handler(BaseHTTPRequestHandler):
         db = get_db()
         uid = self._get_user_id()
         try:
+            if self._handle_ceo(db, 'PUT', path, {}, body, uid):
+                return
             if path.startswith("/api/companies/") and path.count("/") == 3:
                 cid = int(path.split("/")[-1])
                 existing = db.execute("SELECT * FROM companies WHERE id = %s", (cid,)).fetchone()
@@ -2306,6 +2404,8 @@ class handler(BaseHTTPRequestHandler):
         db = get_db()
         uid = self._get_user_id()
         try:
+            if self._handle_ceo(db, 'DELETE', path, {}, None, uid):
+                return
             if path.startswith("/api/companies/") and path.count("/") == 3:
                 cid = int(path.split("/")[-1])
                 row = db.execute("SELECT name FROM companies WHERE id = %s", (cid,)).fetchone()
@@ -2432,6 +2532,298 @@ class handler(BaseHTTPRequestHandler):
                 self._error(404, "Endpoint not found")
         finally:
             db.close()
+
+    # ─── SystemateCEO: mål, ledermøder og aktioner ───
+    def _user_name(self, db, uid):
+        if not uid:
+            return None
+        row = db.execute("SELECT name FROM users WHERE id = %s", (uid,)).fetchone()
+        return row["name"] if row else None
+
+    def _goal_rows(self, db, where="", params=None):
+        return [dict(r) for r in db.execute(f"""
+            SELECT g.*, co.name AS company_name,
+                   (SELECT COUNT(*) FROM goal_milestones m WHERE m.goal_id = g.id) AS milestones_total,
+                   (SELECT COUNT(*) FROM goal_milestones m WHERE m.goal_id = g.id AND m.done) AS milestones_done,
+                   (SELECT c.comment FROM goal_checkins c WHERE c.goal_id = g.id ORDER BY c.checkin_date DESC, c.id DESC LIMIT 1) AS last_comment,
+                   (SELECT COUNT(*) FROM meeting_actions a WHERE a.goal_id = g.id AND a.status = 'open') AS open_actions
+            FROM goals g LEFT JOIN companies co ON g.company_id = co.id
+            WHERE 1=1 {where}
+            ORDER BY CASE g.kind WHEN 'drift' THEN 0 ELSE 1 END, g.due_date ASC NULLS LAST, g.id
+        """, params).fetchall()]
+
+    def _action_rows(self, db, where="", params=None):
+        return [dict(r) for r in db.execute(f"""
+            SELECT a.*, g.title AS goal_title, co.name AS company_name, m.meeting_date AS meeting_date
+            FROM meeting_actions a
+            LEFT JOIN goals g ON a.goal_id = g.id
+            LEFT JOIN companies co ON a.company_id = co.id
+            LEFT JOIN meetings m ON a.meeting_id = m.id
+            WHERE 1=1 {where}
+            ORDER BY CASE a.status WHEN 'open' THEN 0 ELSE 1 END, a.due_date ASC NULLS LAST, a.id
+        """, params).fetchall()]
+
+    def _handle_ceo(self, db, method, path, params, body, uid):
+        """Returns True when the request was a SystemateCEO route and has been answered."""
+        if not (path.startswith("/api/goals") or path.startswith("/api/meetings") or path.startswith("/api/actions")
+                or path.startswith("/api/milestones") or path == "/api/ceo/overview"):
+            return False
+        parts = path.strip("/").split("/")  # e.g. ['api', 'goals', '3', 'checkins']
+        res = parts[1]
+        rid = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
+        sub = parts[3] if len(parts) > 3 else None
+
+        GOAL_FIELDS = ["area", "kind", "title", "description", "owner_role", "company_id", "unit", "start_value",
+                       "target_value", "current_value", "start_date", "due_date", "status", "archived"]
+        MEETING_FIELDS = ["area", "title", "meeting_date", "participants", "status", "summary", "next_meeting_date"]
+        ACTION_FIELDS = ["meeting_id", "area", "goal_id", "company_id", "kind", "title", "owner", "due_date", "status"]
+
+        def blank_to_none(v):
+            return None if v == "" else v
+
+        # ── Overview for Overblik ──
+        if res == "ceo" and method == "GET":
+            goals = self._goal_rows(db, "AND NOT g.archived")
+            actions = self._action_rows(db, "AND a.status = 'open'")
+            last_meetings = [dict(r) for r in db.execute("""
+                SELECT DISTINCT ON (area) id, area, title, meeting_date, status, next_meeting_date
+                FROM meetings WHERE status = 'done' ORDER BY area, meeting_date DESC, id DESC""").fetchall()]
+            planned = [dict(r) for r in db.execute("""
+                SELECT id, area, title, meeting_date, status FROM meetings
+                WHERE status != 'done' ORDER BY meeting_date ASC""").fetchall()]
+            self._json_response({"goals": goals, "open_actions": actions,
+                                 "last_meetings": last_meetings, "planned_meetings": planned})
+            return True
+
+        # ── Goals ──
+        if res == "goals":
+            if method == "GET" and rid is None:
+                where, p = "", []
+                if params.get("area"):
+                    where += " AND g.area = %s"; p.append(params["area"][0])
+                if params.get("kind"):
+                    where += " AND g.kind = %s"; p.append(params["kind"][0])
+                if not params.get("include_archived"):
+                    where += " AND NOT g.archived"
+                self._json_response(self._goal_rows(db, where, p or None))
+            elif method == "GET":
+                rows = self._goal_rows(db, "AND g.id = %s", (rid,))
+                if not rows:
+                    self._error(404, "Mål ikke fundet"); return True
+                goal = rows[0]
+                goal["checkins"] = [dict(r) for r in db.execute(
+                    """SELECT c.*, m.title AS meeting_title FROM goal_checkins c LEFT JOIN meetings m ON c.meeting_id = m.id
+                       WHERE c.goal_id = %s ORDER BY c.checkin_date DESC, c.id DESC""", (rid,)).fetchall()]
+                goal["milestones"] = [dict(r) for r in db.execute(
+                    "SELECT * FROM goal_milestones WHERE goal_id = %s ORDER BY due_date ASC NULLS LAST, id", (rid,)).fetchall()]
+                goal["actions"] = self._action_rows(db, "AND a.goal_id = %s", (rid,))
+                self._json_response(goal)
+            elif method == "POST" and rid is None:
+                vals = {k: blank_to_none(body.get(k)) for k in GOAL_FIELDS if k in body}
+                if not vals.get("title"):
+                    self._error(400, "Titel mangler"); return True
+                cols = list(vals.keys())
+                cur = db.execute(f"INSERT INTO goals ({','.join(cols)}) VALUES ({','.join(['%s'] * len(cols))}) RETURNING id",
+                                 [vals[c] for c in cols])
+                gid = cur.fetchone()["id"]
+                db.commit()
+                log_audit(db, uid, "create", "goal", gid, vals["title"])
+                db.commit()
+                self._json_response(self._goal_rows(db, "AND g.id = %s", (gid,))[0], 201)
+            elif method == "POST" and sub == "checkins":
+                status = body.get("status") or "on_track"
+                value = blank_to_none(body.get("value"))
+                db.execute(
+                    """INSERT INTO goal_checkins (goal_id, meeting_id, checkin_date, value, status, comment, user_name)
+                       VALUES (%s,%s,COALESCE(%s, CURRENT_DATE),%s,%s,%s,%s)""",
+                    (rid, body.get("meeting_id"), blank_to_none(body.get("checkin_date")), value, status,
+                     blank_to_none(body.get("comment")), self._user_name(db, uid)))
+                db.execute(
+                    """UPDATE goals SET status = %s, current_value = COALESCE(%s, current_value),
+                       last_checkin = COALESCE(%s, CURRENT_DATE), updated_at = CURRENT_TIMESTAMP WHERE id = %s""",
+                    (status, value, blank_to_none(body.get("checkin_date")), rid))
+                db.commit()
+                self._json_response(self._goal_rows(db, "AND g.id = %s", (rid,))[0], 201)
+            elif method == "POST" and sub == "milestones":
+                cur = db.execute("INSERT INTO goal_milestones (goal_id, title, due_date) VALUES (%s,%s,%s) RETURNING *",
+                                 (rid, body["title"], blank_to_none(body.get("due_date"))))
+                row = dict(cur.fetchone())
+                db.commit()
+                self._json_response(row, 201)
+            elif method == "PUT" and rid is not None:
+                vals = {k: blank_to_none(body.get(k)) for k in GOAL_FIELDS if k in body}
+                if vals:
+                    sets = ", ".join(f"{k} = %s" for k in vals)
+                    db.execute(f"UPDATE goals SET {sets}, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                               list(vals.values()) + [rid])
+                    db.commit()
+                rows = self._goal_rows(db, "AND g.id = %s", (rid,))
+                if not rows:
+                    self._error(404, "Mål ikke fundet"); return True
+                self._json_response(rows[0])
+            elif method == "DELETE" and rid is not None:
+                row = db.execute("SELECT title FROM goals WHERE id = %s", (rid,)).fetchone()
+                db.execute("DELETE FROM goals WHERE id = %s", (rid,))
+                db.commit()
+                if row:
+                    log_audit(db, uid, "delete", "goal", rid, row["title"])
+                    db.commit()
+                self._no_content()
+            else:
+                self._error(404, "Endpoint not found")
+            return True
+
+        # ── Milestones ──
+        if res == "milestones" and rid is not None:
+            if method == "PUT":
+                row = db.execute("SELECT * FROM goal_milestones WHERE id = %s", (rid,)).fetchone()
+                if not row:
+                    self._error(404, "Milepæl ikke fundet"); return True
+                m = dict(row)
+                for k in ("title", "due_date", "done"):
+                    if k in body:
+                        m[k] = blank_to_none(body[k])
+                done_at = (m.get("done_at") or datetime.now()) if m["done"] else None
+                db.execute("UPDATE goal_milestones SET title=%s, due_date=%s, done=%s, done_at=%s WHERE id=%s",
+                           (m["title"], m["due_date"], bool(m["done"]), done_at, rid))
+                db.commit()
+                self._json_response(dict(db.execute("SELECT * FROM goal_milestones WHERE id = %s", (rid,)).fetchone()))
+            elif method == "DELETE":
+                db.execute("DELETE FROM goal_milestones WHERE id = %s", (rid,))
+                db.commit()
+                self._no_content()
+            else:
+                self._error(404, "Endpoint not found")
+            return True
+
+        # ── Meetings ──
+        if res == "meetings":
+            if method == "GET" and rid is None:
+                where, p = "", []
+                if params.get("area"):
+                    where = " WHERE m.area = %s"; p.append(params["area"][0])
+                rows = [dict(r) for r in db.execute(f"""
+                    SELECT m.*,
+                           (SELECT COUNT(*) FROM meeting_actions a WHERE a.meeting_id = m.id AND a.kind = 'aktion') AS actions_count,
+                           (SELECT COUNT(*) FROM meeting_actions a WHERE a.meeting_id = m.id AND a.kind = 'beslutning') AS decisions_count,
+                           (SELECT COUNT(*) FROM goal_checkins c WHERE c.meeting_id = m.id) AS checkins_count
+                    FROM meetings m {where} ORDER BY m.meeting_date DESC, m.id DESC""", p or None).fetchall()]
+                self._json_response(rows)
+            elif method == "GET":
+                row = db.execute("SELECT * FROM meetings WHERE id = %s", (rid,)).fetchone()
+                if not row:
+                    self._error(404, "Møde ikke fundet"); return True
+                mtg = dict(row)
+                area = mtg["area"]
+                # Ledelsesmødet (tværgående) gennemgår tværgående mål og alle strategiske mål
+                if area == "tvaers":
+                    goal_where, gp = "AND NOT g.archived AND (g.area = 'tvaers' OR g.kind = 'strategisk')", None
+                    act_where, ap = "", None
+                else:
+                    goal_where, gp = "AND NOT g.archived AND g.area = %s", (area,)
+                    act_where, ap = "AND a.area = %s", (area,)
+                mtg["goals"] = self._goal_rows(db, goal_where, gp)
+                checked = {r["goal_id"]: dict(r) for r in db.execute(
+                    "SELECT * FROM goal_checkins WHERE meeting_id = %s ORDER BY id", (rid,)).fetchall()}
+                for g in mtg["goals"]:
+                    g["meeting_checkin"] = checked.get(g["id"])
+                # Aktioner til opfølgning: åbne fra tidligere møder + dem der blev lukket på dette møde
+                mtg["followup_actions"] = self._action_rows(
+                    db, f"{act_where} AND (a.meeting_id IS DISTINCT FROM %s) AND (a.status = 'open' OR a.closed_in_meeting_id = %s)",
+                    (list(ap) if ap else []) + [rid, rid])
+                mtg["new_items"] = self._action_rows(db, "AND a.meeting_id = %s", (rid,))
+                task_area = "" if area == "tvaers" else "AND COALESCE(t.area, 'salg') = %s"
+                mtg["risk_tasks"] = [dict(r) for r in db.execute(f"""
+                    SELECT t.id, t.title, t.priority, t.due_date, t.status, COALESCE(t.area, 'salg') AS area,
+                           co.id AS company_id, co.name AS company_name, u.name AS assigned_to_name
+                    FROM tasks t JOIN companies co ON t.company_id = co.id LEFT JOIN users u ON t.assigned_to = u.id
+                    WHERE t.status != 'done' {task_area}
+                      AND (t.due_date < CURRENT_DATE OR t.priority IN ('high', 'urgent'))
+                    ORDER BY t.due_date ASC NULLS LAST LIMIT 25""", (area,) if task_area else None).fetchall()]
+                mtg["risk_tenders"] = [dict(r) for r in db.execute("""
+                    SELECT t.id, t.title, t.deadline, t.status, t.estimated_value, co.id AS company_id, co.name AS company_name
+                    FROM tenders t JOIN companies co ON t.company_id = co.id
+                    WHERE t.status NOT IN ('won','lost','dropped','submitted') AND t.deadline < CURRENT_DATE + INTERVAL '14 days'
+                    ORDER BY t.deadline ASC""").fetchall()] if area in ("salg", "tvaers") else []
+                prev = db.execute("""SELECT id, title, meeting_date, summary FROM meetings
+                    WHERE area = %s AND id != %s AND status = 'done' AND meeting_date <= %s
+                    ORDER BY meeting_date DESC, id DESC LIMIT 1""", (area, rid, mtg["meeting_date"])).fetchone()
+                mtg["previous"] = dict(prev) if prev else None
+                self._json_response(mtg)
+            elif method == "POST":
+                vals = {k: blank_to_none(body.get(k)) for k in MEETING_FIELDS if k in body}
+                vals.setdefault("status", "planned")
+                cols = list(vals.keys())
+                cur = db.execute(f"INSERT INTO meetings ({','.join(cols)}) VALUES ({','.join(['%s'] * len(cols))}) RETURNING id",
+                                 [vals[c] for c in cols])
+                mid = cur.fetchone()["id"]
+                db.commit()
+                log_audit(db, uid, "create", "meeting", mid, vals.get("title"))
+                db.commit()
+                self._json_response(dict(db.execute("SELECT * FROM meetings WHERE id = %s", (mid,)).fetchone()), 201)
+            elif method == "PUT" and rid is not None:
+                vals = {k: blank_to_none(body.get(k)) for k in MEETING_FIELDS if k in body}
+                if "notes" in body:
+                    vals["notes"] = json.dumps(body["notes"] or {})
+                if vals.get("status") == "done":
+                    vals["completed_at"] = datetime.now()
+                if vals:
+                    sets = ", ".join(f"{k} = %s" for k in vals)
+                    db.execute(f"UPDATE meetings SET {sets} WHERE id = %s", list(vals.values()) + [rid])
+                    db.commit()
+                row = db.execute("SELECT * FROM meetings WHERE id = %s", (rid,)).fetchone()
+                if not row:
+                    self._error(404, "Møde ikke fundet"); return True
+                self._json_response(dict(row))
+            elif method == "DELETE" and rid is not None:
+                db.execute("DELETE FROM meetings WHERE id = %s", (rid,))
+                db.commit()
+                self._no_content()
+            else:
+                self._error(404, "Endpoint not found")
+            return True
+
+        # ── Actions & decisions ──
+        if res == "actions":
+            if method == "GET" and rid is None:
+                where, p = "", []
+                if params.get("area"):
+                    where += " AND a.area = %s"; p.append(params["area"][0])
+                if params.get("status"):
+                    where += " AND a.status = %s"; p.append(params["status"][0])
+                self._json_response(self._action_rows(db, where, p or None))
+            elif method == "POST":
+                vals = {k: blank_to_none(body.get(k)) for k in ACTION_FIELDS if k in body}
+                if not vals.get("title") or not vals.get("area"):
+                    self._error(400, "Titel og område mangler"); return True
+                cols = list(vals.keys())
+                cur = db.execute(f"INSERT INTO meeting_actions ({','.join(cols)}) VALUES ({','.join(['%s'] * len(cols))}) RETURNING id",
+                                 [vals[c] for c in cols])
+                aid = cur.fetchone()["id"]
+                db.commit()
+                self._json_response(self._action_rows(db, "AND a.id = %s", (aid,))[0], 201)
+            elif method == "PUT" and rid is not None:
+                vals = {k: blank_to_none(body.get(k)) for k in ACTION_FIELDS if k in body}
+                if "status" in body:
+                    vals["done_at"] = datetime.now() if body["status"] == "done" else None
+                    vals["closed_in_meeting_id"] = body.get("closed_in_meeting_id") if body["status"] == "done" else None
+                if vals:
+                    sets = ", ".join(f"{k} = %s" for k in vals)
+                    db.execute(f"UPDATE meeting_actions SET {sets} WHERE id = %s", list(vals.values()) + [rid])
+                    db.commit()
+                rows = self._action_rows(db, "AND a.id = %s", (rid,))
+                if not rows:
+                    self._error(404, "Aktion ikke fundet"); return True
+                self._json_response(rows[0])
+            elif method == "DELETE" and rid is not None:
+                db.execute("DELETE FROM meeting_actions WHERE id = %s", (rid,))
+                db.commit()
+                self._no_content()
+            else:
+                self._error(404, "Endpoint not found")
+            return True
+
+        return False
 
     def log_message(self, format, *args):
         pass  # Suppress access logs

@@ -29,7 +29,7 @@
             }
         }
     </script>
-    <link rel="stylesheet" href="/static/css/style.css?v=41">
+    <link rel="stylesheet" href="/static/css/style.css?v=43">
 </head>
 <body class="h-full">
     <div id="app" class="min-h-full">
@@ -45,6 +45,11 @@
                 <div id="search-results" class="hidden"></div>
             </div>
             <div class="top-right">
+                <button id="assistant-btn" class="assistant-btn" title="CEO-assistent">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 0 0-2.456 2.456Z"/></svg>
+                    <span>Assistent</span>
+                    <span id="assistant-badge" class="hidden">0</span>
+                </button>
                 <div id="notification-bell" class="top-icon" title="Notifikationer">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/></svg>
                     <span id="notification-badge" class="hidden">0</span>
@@ -78,6 +83,9 @@
             </div>
         </nav>
 
+        <!-- CEO-assistent -->
+        <div id="assistant-panel" class="hidden"></div>
+
         <!-- Notification Panel -->
         <div id="notification-panel" class="hidden fixed top-0 right-0 w-96 h-full bg-white shadow-2xl z-50 flex flex-col">
             <div class="flex items-center justify-between p-4 border-b">
@@ -102,7 +110,7 @@
         </div>
     </div>
 
-    <script type="module" src="/static/js/api.js?v=40"></script>
-    <script type="module" src="/static/js/app.js?v=40"></script>
+    <script type="module" src="/static/js/api.js?v=41"></script>
+    <script type="module" src="/static/js/app.js?v=41"></script>
 </body>
 </html>

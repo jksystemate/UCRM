@@ -1,4 +1,4 @@
-import { api } from './api.js?v=40';
+import { api } from './api.js?v=41';
 
 // ─── Constants ───
 const CATEGORY_LABELS = { opkald:'Opkald', tilbud:'Tilbud', moede:'Møde', opfølgning:'Opfølgning', demo:'Demo', kontrakt:'Kontrakt', implementering:'Implementering', support:'Support', faktura:'Fakturering', budget:'Budget', generelt:'Generelt' };
@@ -80,6 +80,7 @@ window.addEventListener('load', () => {
     initUserSelector();
     initGlobalSearch();
     initNotifications();
+    initAssistant();
 
     // Force re-render when clicking nav link for the current page (hash unchanged)
     document.querySelectorAll('.nav-link').forEach(link => {
@@ -662,7 +663,7 @@ function renderCustomerMatrix(scores) {
 // ─── Dashboard ───
 async function renderDashboard(container) {
     container.innerHTML = '<div class="text-gray-400">Indlæser dashboard...</div>';
-    const [dashData, ceoData] = await Promise.all([api.getDashboardAll(), api.getCeoOverview().catch(() => null)]);
+    const [dashData, ceoData, assistant] = await Promise.all([api.getDashboardAll(), api.getCeoOverview().catch(() => null), api.getAssistant().catch(() => null)]);
     const scores = dashData.scores;
     const stats = dashData.stats;
     const allTags = dashData.all_tags || [];
@@ -671,6 +672,7 @@ async function renderDashboard(container) {
     container.className = 'ml-64 p-8 fade-in';
 
     container.appendChild(renderCeoOverview(dashData, ceoData));
+    if (assistant) container.firstChild.insertBefore(renderAssistantFocus(assistant), container.firstChild.children[1] || null);
 
     // ─── Active Tenders ───
     const activeTenders = dashData.active_tenders || [];
@@ -5629,4 +5631,116 @@ function renderGroupBlock(company, memberships, members) {
         } }, 'Er selv et indkøbsfællesskab?'));
     box.appendChild(chips);
     return box;
+}
+
+
+// ─── CEO-assistent: hvad mangler, hvad er over frist, og hvad bør jeg gøre? ───
+const SEVERITY = { kritisk: ['Kritisk', 'gs-bad'], vigtig: ['Vigtigt', 'gs-warn'], tips: ['Tips', 'gs-none'] };
+let _assistantChat = [];
+
+function assistantItem(it, onChange, compact = false) {
+    const [label, cls] = SEVERITY[it.severity];
+    return h('div', { className: `as-item sev-${it.severity}` },
+        h('div', { className: 'flex items-center gap-2 mb-1 flex-wrap' },
+            h('span', { className: `gs-pill ${cls}` }, label),
+            it.area && GOAL_AREAS[it.area] ? h('span', { className: `area-pill area-${it.area}` }, GOAL_AREAS[it.area]) : null),
+        h('div', { className: 'as-title' }, it.title),
+        it.detail ? h('div', { className: 'as-detail' }, it.detail) : null,
+        !compact && it.why ? h('div', { className: 'as-why' }, it.why) : null,
+        h('div', { className: 'flex items-center gap-3 mt-2' },
+            h('a', { href: it.href, className: 'act-btn primary', onClick: () => closeAssistant() }, `${it.action} →`),
+            h('button', { className: 'text-xs text-gray-400 hover:underline', onClick: async () => { await api.snoozeAssistant(it.id, 7); onChange && onChange(); updateAssistantBadge(); } }, 'Udsæt en uge')));
+}
+
+function renderAssistantFocus(a) {
+    const top = a.items.slice(0, 3);
+    const box = h('div', { className: 'as-focus mb-5' },
+        h('div', { className: 'flex items-center justify-between mb-3' },
+            h('div', { className: 'flex items-center gap-2' },
+                h('span', { className: 'as-spark' }, '✦'),
+                h('b', { className: 'text-gray-900' }, 'Assistenten: dagens fokus'),
+                h('span', { className: 'text-sm text-gray-500' }, `${a.counts.kritisk} kritiske · ${a.counts.vigtig} vigtige · ${a.counts.tips} tips`)),
+            h('button', { className: 'text-sm font-semibold text-blue-600 hover:underline', onClick: () => openAssistant() }, `Se alle ${a.items.length} →`)));
+    if (!top.length) box.appendChild(h('div', { className: 'text-sm text-gray-500' }, 'Intet at gøre lige nu. Alt er fulgt op.'));
+    box.appendChild(h('div', { className: 'grid grid-cols-1 lg:grid-cols-3 gap-3' }, ...top.map(it => assistantItem(it, () => router(), true))));
+    return box;
+}
+
+async function updateAssistantBadge() {
+    try {
+        const a = await api.getAssistant();
+        const n = a.counts.kritisk + a.counts.vigtig;
+        const b = document.getElementById('assistant-badge');
+        b.textContent = String(n);
+        b.classList.toggle('hidden', n === 0);
+        b.classList.toggle('crit', a.counts.kritisk > 0);
+        return a;
+    } catch (e) { return null; }
+}
+
+function initAssistant() {
+    document.getElementById('assistant-btn')?.addEventListener('click', () => {
+        const p = document.getElementById('assistant-panel');
+        if (p.classList.contains('hidden')) openAssistant(); else closeAssistant();
+    });
+    setTimeout(updateAssistantBadge, 1500);
+}
+function closeAssistant() { document.getElementById('assistant-panel')?.classList.add('hidden'); }
+
+async function openAssistant() {
+    const panel = document.getElementById('assistant-panel');
+    panel.classList.remove('hidden');
+    panel.innerHTML = '<div class="p-6 text-gray-400">Gennemgår mål, møder, aktioner og tilbud…</div>';
+    const a = await updateAssistantBadge();
+    if (!a) { panel.innerHTML = '<div class="p-6 text-red-600">Assistenten kunne ikke hentes.</div>'; return; }
+    panel.innerHTML = '';
+    const list = h('div', { className: 'as-list' });
+    const drawList = (data) => {
+        list.innerHTML = '';
+        for (const sev of ['kritisk', 'vigtig', 'tips']) {
+            const items = data.items.filter(i => i.severity === sev);
+            if (!items.length) continue;
+            list.appendChild(h('div', { className: 'as-sec' }, `${SEVERITY[sev][0]} (${items.length})`));
+            for (const it of items) list.appendChild(assistantItem(it, async () => drawList(await api.getAssistant())));
+        }
+        if (!data.items.length) list.appendChild(h('div', { className: 'text-sm text-gray-500 p-4' }, 'Intet at gøre lige nu. Alt er fulgt op.'));
+        if (data.snoozed) list.appendChild(h('button', { className: 'text-xs text-gray-400 hover:underline mt-3', onClick: async () => { await api.clearAssistantSnoozes(); drawList(await api.getAssistant()); updateAssistantBadge(); } }, `Vis ${data.snoozed} udsatte punkter igen`));
+    };
+    drawList(a);
+
+    // AI-rådgivning: plan og spørgsmål
+    const chat = h('div', { className: 'as-chat' });
+    const drawChat = () => {
+        chat.innerHTML = '';
+        for (const m of _assistantChat) chat.appendChild(m.role === 'user'
+            ? h('div', { className: 'as-q' }, m.content)
+            : h('div', { className: 'as-a md', innerHTML: miniMarkdown(m.content) }));
+    };
+    const input = h('input', { className: 'as-input', placeholder: a.ai ? 'Spørg assistenten…' : 'AI er ikke slået til endnu', ...(a.ai ? {} : { disabled: '' }) });
+    const ask = async (q) => {
+        if (!q.trim()) return;
+        _assistantChat.push({ role: 'user', content: q }); drawChat();
+        const wait = h('div', { className: 'as-a text-gray-400' }, 'Tænker…'); chat.appendChild(wait); chat.scrollTop = chat.scrollHeight;
+        try {
+            const res = await api.askAssistant(q, _assistantChat.slice(0, -1));
+            _assistantChat.push({ role: 'assistant', content: res.answer });
+        } catch (e) { _assistantChat.push({ role: 'assistant', content: `Fejl: ${e.message}` }); }
+        drawChat(); chat.scrollTop = chat.scrollHeight;
+    };
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') { const q = input.value; input.value = ''; ask(q); } });
+    const quick = ['Lav min plan for ugen', 'Hvad skal jeg tage op med CCO?', 'Hvad skal jeg tage op med COO?', 'Hvad skal jeg tage op med CFO?', 'Hvilke mål er i fare, og hvad gør jeg?'];
+    drawChat();
+
+    panel.append(
+        h('div', { className: 'as-head' },
+            h('div', {}, h('div', { className: 'font-bold text-gray-900 text-lg' }, '✦ CEO-assistent'),
+                h('div', { className: 'text-xs text-gray-500' }, `${a.counts.kritisk} kritiske · ${a.counts.vigtig} vigtige · ${a.counts.tips} tips`)),
+            h('button', { className: 'text-gray-400 hover:text-gray-700 text-2xl', onClick: closeAssistant }, '×')),
+        h('div', { className: 'as-body' },
+            h('div', { className: 'as-ai' },
+                h('div', { className: 'font-semibold text-gray-900 mb-2' }, 'Spørg assistenten'),
+                a.ai ? h('div', { className: 'flex flex-wrap gap-1 mb-2' }, ...quick.map(q => h('button', { className: 'as-chip', onClick: () => ask(q) }, q)))
+                     : h('div', { className: 'text-xs text-yellow-700 mb-2' }, 'Kræver ANTHROPIC_API_KEY i Vercel. Tjeklisten herunder virker uden.'),
+                chat, input),
+            list));
 }

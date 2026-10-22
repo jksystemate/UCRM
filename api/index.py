@@ -2722,7 +2722,7 @@ class handler(BaseHTTPRequestHandler):
         if path == "/api/purchasing-groups" or (path.startswith("/api/companies/") and ("/memberships" in path or path.endswith("/group"))):
             return self._handle_groups(db, method, path, body, uid)
         if not (path.startswith("/api/goals") or path.startswith("/api/meetings") or path.startswith("/api/actions")
-                or path.startswith("/api/milestones") or path == "/api/ceo/overview"):
+                or path.startswith("/api/milestones") or path.startswith("/api/ceo/")):
             return False
         parts = path.strip("/").split("/")  # e.g. ['api', 'goals', '3', 'checkins']
         res = parts[1]
@@ -2738,6 +2738,8 @@ class handler(BaseHTTPRequestHandler):
             return None if v == "" else v
 
         # ── Overview for Overblik ──
+        if path.startswith("/api/ceo/assistant"):
+            return self._handle_assistant(db, method, path, body)
         if res == "ceo" and method == "GET":
             goals = self._goal_rows(db, "AND NOT g.archived")
             actions = self._action_rows(db, "AND a.status = 'open'")
@@ -2980,6 +2982,183 @@ class handler(BaseHTTPRequestHandler):
             return True
 
         return False
+
+    # ─── CEO-assistent: hvad mangler, hvad er over frist, og hvad bør CEO'en gøre ───
+    def _assistant_checks(self, db):
+        today = date.today()
+        iso = today.isoformat()
+        out = []
+        area_label = {"salg": "Salg & marketing", "leverance": "Leverance", "oekonomi": "Økonomi", "tvaers": "Tværgående"}
+        role = {"salg": "CCO", "leverance": "COO", "oekonomi": "CFO", "tvaers": "CEO"}
+
+        def add(id, severity, area, title, detail, action, href, why=""):
+            out.append({"id": id, "severity": severity, "area": area, "title": title, "detail": detail,
+                        "why": why, "action": action, "href": href})
+
+        # Mål
+        goals = self._goal_rows(db, "AND NOT g.archived")
+        for g in goals:
+            gl = f"#/goals/{g['id']}"
+            if g["status"] == "done":
+                continue
+            due = str(g.get("due_date") or "")[:10]
+            if not due:
+                add(f"goal-nodue-{g['id']}", "vigtig", g["area"], f"Målet \u201d{g['title']}\u201d har ingen deadline",
+                    "Uden deadline kan systemet ikke vurdere, om I er bagud.", "Sæt en deadline", gl,
+                    "Et mål uden tidsramme bliver sjældent fulgt op.")
+            elif due < iso:
+                add(f"goal-overdue-{g['id']}", "kritisk", g["area"], f"Målet \u201d{g['title']}\u201d er over deadline",
+                    f"Deadline var {due}. Status: {g['status']}.", "Afslut, forlæng eller justér målet", gl,
+                    "Beslut om målet er nået, skal forlænges med en ny plan, eller skal opgives.")
+            if g.get("target_value") is None and not g.get("milestones_total"):
+                add(f"goal-unmeasurable-{g['id']}", "vigtig", g["area"], f"Målet \u201d{g['title']}\u201d kan ikke måles",
+                    "Der er hverken måltal eller milepæle.", "Tilføj måltal eller milepæle", gl,
+                    "Uden noget at måle på bliver statusmøderne en vurdering af stemning.")
+            if not g.get("owner_role"):
+                add(f"goal-noowner-{g['id']}", "vigtig", g["area"], f"Målet \u201d{g['title']}\u201d har ingen ansvarlig",
+                    "", "Vælg ansvarlig (CCO, COO, CFO eller CEO)", gl)
+            if g.get("kind") == "strategisk" and not g.get("milestones_total"):
+                add(f"goal-nomilestones-{g['id']}", "tips", g["area"], f"Det strategiske mål \u201d{g['title']}\u201d har ingen milepæle",
+                    "Strategiske mål flytter sig bedst i konkrete skridt.", "Tilføj 2–3 milepæle", gl)
+            ref = g.get("last_checkin") or str(g.get("created_at") or "")[:10]
+            if ref and (today - date.fromisoformat(str(ref)[:10])).days > 30:
+                add(f"goal-stale-{g['id']}", "vigtig", g["area"], f"\u201d{g['title']}\u201d er ikke fulgt op i over 30 dage",
+                    f"Sidst opdateret {g.get('last_checkin') or 'aldrig'}.", f"Opdatér status, eller tag det op med {g.get('owner_role') or role.get(g['area'])}", gl)
+            if g["status"] in ("off_track", "at_risk") and not g.get("open_actions"):
+                add(f"goal-noaction-{g['id']}", "kritisk", g["area"], f"\u201d{g['title']}\u201d er {'bagud' if g['status'] == 'off_track' else 'i risiko'} uden en aktion",
+                    "Der er ingen åbne aktioner, der skal bringe målet på sporet.", "Aftal en aktion med ansvarlig og frist", gl)
+        # Milepæle over frist
+        for m in db.execute("""SELECT m.id, m.title, m.due_date, g.id AS goal_id, g.title AS goal_title, g.area
+                               FROM goal_milestones m JOIN goals g ON m.goal_id = g.id
+                               WHERE NOT m.done AND m.due_date < CURRENT_DATE AND NOT g.archived""").fetchall():
+            add(f"ms-overdue-{m['id']}", "vigtig", m["area"], f"Milepælen \u201d{m['title']}\u201d er over frist",
+                f"Del af målet \u201d{m['goal_title']}\u201d. Frist var {m['due_date']}.", "Afslut eller sæt ny frist", f"#/goals/{m['goal_id']}")
+        # Aktioner
+        for a in self._action_rows(db, "AND a.status = 'open' AND a.kind = 'aktion'"):
+            href = f"#/goals/{a['goal_id']}" if a.get("goal_id") else (f"#/meetings/{a['meeting_id']}" if a.get("meeting_id") else "#/meetings")
+            if a.get("due_date") and str(a["due_date"])[:10] < iso:
+                add(f"action-overdue-{a['id']}", "kritisk", a["area"], f"Aktionen \u201d{a['title']}\u201d er over frist",
+                    f"Ansvarlig: {a.get('owner') or 'ingen'}. Frist var {a['due_date']}.", "Følg op med den ansvarlige, eller sæt ny frist", href)
+            elif not a.get("owner") or not a.get("due_date"):
+                add(f"action-incomplete-{a['id']}", "vigtig", a["area"], f"Aktionen \u201d{a['title']}\u201d mangler " + ("ansvarlig" if not a.get("owner") else "frist"),
+                    "", "Giv aktionen en ansvarlig og en frist", href)
+        # Møder pr. område
+        for area in ("salg", "leverance", "oekonomi", "tvaers"):
+            last = db.execute("SELECT MAX(meeting_date) AS d FROM meetings WHERE area = %s AND status = 'done'", (area,)).fetchone()["d"]
+            planned = db.execute("SELECT id, meeting_date, status FROM meetings WHERE area = %s AND status != 'done' ORDER BY meeting_date LIMIT 1", (area,)).fetchone()
+            if planned and str(planned["meeting_date"])[:10] < iso:
+                add(f"meeting-missed-{planned['id']}", "vigtig", area, f"Mødet med {role[area]} ({area_label[area]}) blev ikke afsluttet",
+                    f"Det var planlagt {planned['meeting_date']}" + (" og er stadig i gang." if planned["status"] == "in_progress" else "."),
+                    "Afhold og afslut mødet, eller flyt det", f"#/meetings/{planned['id']}")
+            elif not planned and (not last or (today - last).days > 30):
+                add(f"meeting-none-{area}", "kritisk" if area != "tvaers" else "vigtig", area,
+                    f"Intet møde planlagt med {role[area]} ({area_label[area]})",
+                    "Sidste møde: " + (str(last) if last else "aldrig") + ".", "Planlæg næste møde", "#/meetings",
+                    "Faste møder er det, der gør opfølgningen konsekvent.")
+        # Indrapporteringer
+        for r in db.execute("""SELECT id, area, respondent_name, due_date, status, practice FROM report_rounds
+                               WHERE status = 'open' AND NOT practice""").fetchall():
+            if r["due_date"] and str(r["due_date"])[:10] < iso:
+                add(f"report-late-{r['id']}", "vigtig", r["area"], f"{r['respondent_name']} har ikke indsendt indrapporteringen",
+                    f"Svarfristen var {r['due_date']}.", "Send en påmindelse", f"#/reports/{r['id']}")
+        for r in db.execute("SELECT id FROM report_rounds WHERE status = 'answered' AND NOT practice ORDER BY submitted_at DESC LIMIT 5").fetchall():
+            rnd = self._round_full(db, r["id"])
+            sug = self._cleanup_suggestions(db, rnd)
+            if sug:
+                add(f"report-cleanup-{r['id']}", "vigtig", rnd["area"], f"{len(sug)} forslag til oprydning fra {rnd['respondent_name']}s indrapportering",
+                    ", ".join(x["company_name"] for x in sug[:4]), "Gennemse og udfør", f"#/reports/{r['id']}")
+            if not rnd.get("ai_assessment") and os.environ.get("ANTHROPIC_API_KEY"):
+                add(f"report-noassess-{r['id']}", "tips", rnd["area"], f"Indrapporteringen fra {rnd['respondent_name']} er ikke vurderet",
+                    "", "Lav AI-vurdering før mødet", f"#/reports/{r['id']}")
+        # Tilbud og sager
+        for t in db.execute("""SELECT t.id, t.title, t.deadline, t.status, co.name FROM tenders t JOIN companies co ON t.company_id = co.id
+                               WHERE t.status IN ('draft','in_progress') AND t.deadline < CURRENT_DATE ORDER BY t.deadline""").fetchall():
+            add(f"tender-overdue-{t['id']}", "vigtig", "salg", f"Tilbuddet til {t['name']} er over deadline",
+                f"\u201d{t['title']}\u201d, deadline {t['deadline']}, status stadig {t['status']}.", "Opdatér status: indsendt, udskudt, tabt eller droppet", f"#/tenders/{t['id']}")
+        late = db.execute("""SELECT COALESCE(area,'salg') AS area, COUNT(*) AS n FROM tasks
+                             WHERE status != 'done' AND due_date < CURRENT_DATE GROUP BY COALESCE(area,'salg')""").fetchall()
+        for r in late:
+            add(f"tasks-late-{r['area']}", "vigtig" if r["n"] < 5 else "kritisk", r["area"], f"{r['n']} sager over frist inden for {area_label[r['area']].lower()}",
+                "", f"Gennemgå dem med {role[r['area']]}, eller luk dem der er afklaret", f"#/area/{r['area']}")
+        dup = db.execute("""SELECT co.name, t.title, COUNT(*) AS n, MIN(t.id) AS id FROM tenders t JOIN companies co ON t.company_id = co.id
+                            WHERE t.status NOT IN ('won','lost','dropped') GROUP BY co.name, t.title HAVING COUNT(*) > 1""").fetchall()
+        for d in dup:
+            add(f"tender-dup-{d['id']}", "tips", "salg", f"{d['n']} ens tilbud til {d['name']}", f"\u201d{d['title']}\u201d. Er det dubletter?",
+                "Slå dem sammen til ét", f"#/tenders/{d['id']}")
+        missing_type = db.execute("""SELECT COUNT(DISTINCT co.id) AS n FROM companies co
+                                     WHERE NOT COALESCE(co.is_purchasing_group, FALSE) AND co.sales_type IS NULL
+                                       AND co.id IN (SELECT company_id FROM tenders WHERE status NOT IN ('won','lost','dropped'))""").fetchone()["n"]
+        if missing_type:
+            add("customers-notype", "tips", "salg", f"{missing_type} kunder med åbne tilbud mangler salgsform",
+                "Systemet ved ikke, om det er direkte salg eller udbud.", "Bed CCO om indrapportering. Det klares i én klik-liste", "#/meetings")
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            add("setup-ai", "tips", "tvaers", "AI er ikke slået til", "AI-spørgsmål, opfølgning, vurderinger og assistentens råd kræver en API-nøgle.",
+                "Tilføj ANTHROPIC_API_KEY i Vercel", "#/meetings")
+
+        snoozed = json.loads(self._setting(db, "assistant_snoozed", "{}") or "{}")
+        active = [x for x in out if not (snoozed.get(x["id"]) and snoozed[x["id"]] >= iso)]
+        order = {"kritisk": 0, "vigtig": 1, "tips": 2}
+        active.sort(key=lambda x: order[x["severity"]])
+        return active, len(out) - len(active)
+
+    def _assistant_snapshot(self, db, checks):
+        """Kompakt billede af virksomheden til AI-rådgivning."""
+        goals = [{"titel": g["title"], "område": g["area"], "type": g["kind"], "ansvarlig": g.get("owner_role"), "status": g["status"],
+                  "nu": g.get("current_value"), "mål": g.get("target_value"), "enhed": g.get("unit"), "deadline": g.get("due_date"),
+                  "sidst_opdateret": g.get("last_checkin"), "milepæle": f"{g.get('milestones_done')}/{g.get('milestones_total')}"}
+                 for g in self._goal_rows(db, "AND NOT g.archived")]
+        actions = [{"titel": a["title"], "område": a["area"], "ansvarlig": a.get("owner"), "frist": a.get("due_date")}
+                   for a in self._action_rows(db, "AND a.status = 'open'")]
+        meetings = [dict(r) for r in db.execute("""SELECT area, title, meeting_date, status FROM meetings
+                                                   ORDER BY meeting_date DESC LIMIT 12""").fetchall()]
+        tenders = [dict(r) for r in db.execute("""SELECT co.name AS kunde, t.title, t.status, t.deadline, t.estimated_value, t.purchase_route
+                                                  FROM tenders t JOIN companies co ON t.company_id = co.id
+                                                  WHERE t.status NOT IN ('lost','dropped') ORDER BY t.deadline NULLS LAST""").fetchall()]
+        return {"dato": date.today().isoformat(), "mål": goals, "åbne_aktioner": actions, "møder": meetings,
+                "tilbud": tenders, "assistentens_tjek": [{k: c[k] for k in ("severity", "area", "title", "detail", "action")} for c in checks]}
+
+    def _handle_assistant(self, db, method, path, body):
+        if path == "/api/ceo/assistant" and method == "GET":
+            checks, snoozed = self._assistant_checks(db)
+            counts = {s: sum(1 for c in checks if c["severity"] == s) for s in ("kritisk", "vigtig", "tips")}
+            self._json_response({"items": checks, "counts": counts, "snoozed": snoozed,
+                                 "ai": bool(os.environ.get("ANTHROPIC_API_KEY"))})
+        elif path == "/api/ceo/assistant/snooze" and method == "POST":
+            snoozed = json.loads(self._setting(db, "assistant_snoozed", "{}") or "{}")
+            snoozed = {k: v for k, v in snoozed.items() if v >= date.today().isoformat()}
+            if body.get("id"):
+                snoozed[body["id"]] = (date.today() + timedelta(days=int(body.get("days") or 7))).isoformat()
+            if body.get("clear"):
+                snoozed = {}
+            db.execute("""INSERT INTO app_settings (key, value, updated_at) VALUES ('assistant_snoozed', %s, CURRENT_TIMESTAMP)
+                          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP""", (json.dumps(snoozed),))
+            db.commit()
+            self._json_response({"ok": True})
+        elif path == "/api/ceo/assistant/ask" and method == "POST":
+            if not os.environ.get("ANTHROPIC_API_KEY"):
+                self._error(400, "AI er ikke slået til endnu (ANTHROPIC_API_KEY mangler i Vercel)"); return True
+            checks, _ = self._assistant_checks(db)
+            snapshot = self._assistant_snapshot(db, checks)
+            system = (
+                "Du er CEO-assistent i SystemateCEO for CEO'en i Systemate (software til forsynings- og energiselskaber). "
+                "CEO'en følger op på tre områder med faste ledermøder: salg & marketing (CCO), leverance (COO) og økonomi (CFO), "
+                "plus tværgående strategiske mål. Du vejleder om, hvad der mangler, hvad der er over frist, og hvad CEO'en konkret bør gøre.\n\n"
+                f"CEO'ens salgsproces og fokus:\n{self._setting(db, 'sales_process', DEFAULT_SALES_PROCESS)}\n{self._setting(db, 'ceo_focus', '')}\n\n"
+                "Regler: Svar på dansk, kort og handlingsorienteret. Nævn mål, kunder, aktioner og personer ved navn. "
+                "Prioritér: hvad er vigtigst først, og hvorfor. Foreslå konkrete næste skridt med hvem og hvornår. "
+                "Byg kun på data herunder. Gæt ikke, og sig det, hvis data mangler. Brug overskrifter (##) og punktlister.\n\n"
+                "Data (JSON):\n" + json.dumps(snapshot, ensure_ascii=False, default=_json_default))
+            history = [m for m in (body.get("history") or []) if m.get("role") in ("user", "assistant") and m.get("content")][-8:]
+            question = (body.get("question") or "").strip() or "Hvad bør jeg fokusere på nu?"
+            messages = history + [{"role": "user", "content": question}]
+            try:
+                text, model = self._claude_messages(system, messages)
+            except Exception as e:
+                self._error(502, f"Assistenten kunne ikke svare: {e}"); return True
+            self._json_response({"answer": text, "model": model})
+        else:
+            self._error(404, "Endpoint not found")
+        return True
 
     # ─── Indkøbsfællesskaber ───
     def _handle_groups(self, db, method, path, body, uid):
@@ -3412,6 +3591,18 @@ class handler(BaseHTTPRequestHandler):
             raise RuntimeError("Svaret blev for langt. Prøv med færre emner ad gangen.")
         text = "\n".join(b.text for b in response.content if b.type == "text").strip()
         return (json.loads(text) if schema else text), response.model
+
+    def _claude_messages(self, system, messages, effort="medium"):
+        """Samtale med Claude (flere beskeder), fx CEO-assistentens spørg-funktion."""
+        import anthropic
+        client = anthropic.Anthropic()
+        response = client.beta.messages.create(
+            model="claude-opus-5-5", max_tokens=4000, output_config={"effort": effort},
+            betas=["server-side-fallback-2026-07-01"], fallbacks="default",
+            system=system, messages=messages)
+        if response.stop_reason == "refusal":
+            raise RuntimeError("Modellen afviste spørgsmålet.")
+        return "\n".join(b.text for b in response.content if b.type == "text").strip(), response.model
 
     def _ai_preamble(self, db, area):
         role = {"salg": "CCO (salg & marketing)", "leverance": "COO (leverance)", "oekonomi": "CFO (økonomi)"}.get(area, area)

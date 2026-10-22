@@ -256,6 +256,11 @@ export const api = {
     assessReportRound: (id) => request(`/report-rounds/${id}/assess`, { method: 'POST' }),
     updateReportRound: (id, data) => request(`/report-rounds/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
     deleteReportRound: (id) => request(`/report-rounds/${id}`, { method: 'DELETE' }),
+    // CEO-assistent
+    getAssistant: () => request('/ceo/assistant'),
+    snoozeAssistant: (id, days = 7) => request('/ceo/assistant/snooze', { method: 'POST', body: JSON.stringify({ id, days }) }),
+    clearAssistantSnoozes: () => request('/ceo/assistant/snooze', { method: 'POST', body: JSON.stringify({ clear: true }) }),
+    askAssistant: (question, history = []) => request('/ceo/assistant/ask', { method: 'POST', body: JSON.stringify({ question, history }) }),
     // Indkøbsfællesskaber
     getPurchasingGroups: () => request('/purchasing-groups'),
     setPurchasingGroup: (companyId, isGroup) => request(`/companies/${companyId}/group`, { method: 'PUT', body: JSON.stringify({ is_purchasing_group: isGroup }) }),

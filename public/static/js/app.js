@@ -697,10 +697,10 @@ async function renderDashboard(container) {
 
             tenderGrid.appendChild(h('a', { href: `#/tenders/${t.id}`, className: 'block border border-gray-200 rounded-lg p-4 hover:border-blue-300 hover:shadow-sm transition-all' },
                 h('div', { className: 'flex items-start justify-between mb-2' },
-                    h('div', { className: 'font-medium text-gray-900 text-sm truncate flex-1' }, t.title),
+                    h('div', { className: 'font-semibold text-gray-900 truncate flex-1' }, t.company_name || t.title),
                     h('span', { className: `inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${TENDER_STATUS_COLORS[t.status] || ''}` }, TENDER_STATUS_LABELS[t.status] || t.status)
                 ),
-                h('div', { className: 'text-xs text-gray-500 mb-2' }, t.company_name),
+                t.company_name ? h('div', { className: 'text-xs text-gray-500 truncate mb-2' }, t.title) : null,
                 h('div', { className: 'flex items-center gap-3 text-xs' },
                     h('div', { className: 'flex-1' },
                         h('div', { className: 'w-full h-1.5 rounded-full bg-gray-200 overflow-hidden' },
@@ -2361,11 +2361,13 @@ function renderTenderList(container, tenders, statusFilter) {
             className: `flex items-center gap-4 px-6 py-4 border-b border-gray-100 hover:bg-gray-50 cursor-pointer transition-colors ${isOverdue ? 'border-l-4 border-l-red-500 bg-red-50' : ''}`,
             onClick: () => { location.hash = `#/tenders/${t.id}`; }
         },
-            h('div', { className: 'flex-1' },
-                h('div', { className: 'font-medium text-gray-900' }, t.title),
+            h('div', { className: 'flex-1 min-w-0' },
+                t.company_name
+                    ? h('a', { href: `#/companies/${t.company_id}`, className: 'font-semibold text-gray-900 hover:underline', onClick: (e) => e.stopPropagation() }, t.company_name)
+                    : h('div', { className: 'font-semibold text-gray-900' }, t.title),
+                t.company_name ? h('div', { className: 'text-sm text-gray-500 truncate' }, t.title) : null,
                 h('div', { className: 'flex flex-wrap gap-2 mt-1' },
                     h('span', { className: `inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${TENDER_STATUS_COLORS[t.status] || ''}` }, TENDER_STATUS_LABELS[t.status] || t.status),
-                    t.company_name ? h('a', { href: `#/companies/${t.company_id}`, className: 'text-xs text-blue-600 hover:underline', onClick: (e) => e.stopPropagation() }, t.company_name) : null,
                     t.responsible_name ? h('span', { className: 'text-xs text-gray-500' }, t.responsible_name) : null,
                     t.estimated_value ? h('span', { className: 'text-xs text-gray-400' }, t.estimated_value) : null
                 )
@@ -2401,10 +2403,13 @@ async function renderTenderDetail(container, id) {
         h('a', { href: '#/tenders', className: 'text-sm text-blue-600 hover:underline mb-2 inline-block' }, '\u2190 Alle tilbud'),
         h('div', { className: 'flex justify-between items-start' },
             h('div', {},
-                h('h1', { className: 'text-2xl font-bold text-gray-900' }, tender.title),
+                tender.company_name
+                    ? h('h1', { className: 'text-2xl font-bold text-gray-900' },
+                        h('a', { href: `#/companies/${tender.company_id}`, className: 'hover:underline' }, tender.company_name))
+                    : h('h1', { className: 'text-2xl font-bold text-gray-900' }, tender.title),
+                tender.company_name ? h('div', { className: 'text-base text-gray-500 mt-1' }, tender.title) : null,
                 h('div', { className: 'flex flex-wrap gap-2 mt-2' },
                     h('span', { className: `inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${TENDER_STATUS_COLORS[tender.status] || ''}` }, TENDER_STATUS_LABELS[tender.status] || tender.status),
-                    tender.company_name ? h('a', { href: `#/companies/${tender.company_id}`, className: 'text-sm text-blue-600 hover:underline' }, tender.company_name) : null,
                     tender.deadline ? h('span', { className: 'text-sm text-gray-500' }, `Deadline: ${formatDate(tender.deadline)}`) : null,
                     tender.estimated_value ? h('span', { className: 'text-sm text-gray-400' }, tender.estimated_value) : null
                 )

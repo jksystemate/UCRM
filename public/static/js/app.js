@@ -1,4 +1,4 @@
-import { api } from './api.js?v=46';
+import { api } from './api.js?v=47';
 
 // ─── Constants ───
 const CATEGORY_LABELS = { opkald:'Opkald', tilbud:'Tilbud', moede:'Møde', opfølgning:'Opfølgning', demo:'Demo', kontrakt:'Kontrakt', implementering:'Implementering', support:'Support', faktura:'Fakturering', budget:'Budget', generelt:'Generelt' };
@@ -3917,6 +3917,7 @@ async function renderUsers(container) {
                 ),
                 h('div', { className: 'flex items-center gap-3' },
                     h('span', { className: `badge ${u.role === 'admin' ? 'bg-purple-100 text-purple-800' : 'bg-gray-100 text-gray-600'}` }, u.role),
+                    h('button', { className: 'text-sm text-blue-600 hover:underline', onClick: () => showUserForm(u) }, 'Rediger'),
                     h('button', {
                         className: 'text-gray-300 hover:text-red-500', title: 'Deaktiver bruger',
                         onClick: async () => {
@@ -3965,28 +3966,33 @@ async function renderUsers(container) {
     }
 }
 
-function showUserForm() {
+function showUserForm(existing = null) {
     const form = h('form', { className: 'space-y-4', onSubmit: async (e) => {
         e.preventDefault();
         const fd = new FormData(e.target);
-        try { await api.createUser(Object.fromEntries(fd.entries())); closeModal(); router(); initUserSelector(); }
+        try {
+            if (existing) await api.updateUser(existing.id, Object.fromEntries(fd.entries()));
+            else await api.createUser(Object.fromEntries(fd.entries()));
+            closeModal(); router(); initUserSelector();
+        }
         catch (err) { alert(err.message); }
     }},
-        formField('Navn *', 'name', '', 'text', true),
-        formField('Email *', 'email', '', 'email', true),
+        formField('Navn *', 'name', existing?.name || '', 'text', true),
+        formField('Email *', 'email', existing?.email || '', 'email', true),
+        existing ? h('p', { className: 'text-xs text-gray-500' }, 'Brug samme e-mail som i Slack, så beskeder kan finde frem.') : null,
         h('div', {},
             h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, 'Rolle'),
             h('select', { name:'role', className:'w-full border border-gray-300 rounded-lg px-3 py-2' },
-                h('option', { value:'user' }, 'Bruger'),
-                h('option', { value:'admin' }, 'Administrator'),
+                h('option', { value:'user', ...(existing?.role === 'user' ? { selected: '' } : {}) }, 'Bruger'),
+                h('option', { value:'admin', ...(existing?.role === 'admin' ? { selected: '' } : {}) }, 'Administrator'),
             )
         ),
         h('div', { className: 'flex justify-end gap-3 pt-2' },
             h('button', { type:'button', className:'px-4 py-2 text-gray-600', onClick: closeModal }, 'Annuller'),
-            h('button', { type:'submit', className:'bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 font-medium' }, 'Opret')
+            h('button', { type:'submit', className:'bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 font-medium' }, existing ? 'Gem' : 'Opret')
         )
     );
-    showModal('Ny bruger', form);
+    showModal(existing ? 'Rediger bruger' : 'Ny bruger', form);
 }
 
 // ─── Settings Page ───

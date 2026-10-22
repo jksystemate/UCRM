@@ -2336,6 +2336,21 @@ class handler(BaseHTTPRequestHandler):
         try:
             if self._handle_ceo(db, 'PUT', path, {}, body, uid):
                 return
+            if path.startswith("/api/users/") and path.count("/") == 3:
+                # Ret navn, e-mail og rolle (e-mailen bruges fx til at finde personen i Slack)
+                user_id = int(path.split("/")[-1])
+                vals = {k: (body[k].strip() if isinstance(body.get(k), str) else body.get(k)) for k in ("name", "email", "role") if body.get(k)}
+                if vals:
+                    try:
+                        db.execute(f"UPDATE users SET {', '.join(f'{k} = %s' for k in vals)} WHERE id = %s", list(vals.values()) + [user_id])
+                        db.commit()
+                    except psycopg2.errors.UniqueViolation:
+                        db.rollback()
+                        return self._error(400, "E-mailen bruges allerede af en anden bruger")
+                    log_audit(db, uid, "update", "user", user_id, vals.get("name") or vals.get("email"))
+                    db.commit()
+                row = db.execute("SELECT * FROM users WHERE id = %s", (user_id,)).fetchone()
+                return self._json_response(dict(row)) if row else self._error(404, "Bruger ikke fundet")
             if path.startswith("/api/companies/") and path.count("/") == 3:
                 cid = int(path.split("/")[-1])
                 existing = db.execute("SELECT * FROM companies WHERE id = %s", (cid,)).fetchone()

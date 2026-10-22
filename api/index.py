@@ -358,6 +358,7 @@ def init_db():
             "ALTER TABLE companies ADD COLUMN IF NOT EXISTS est_kunder TEXT",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP",
             "ALTER TABLE interactions ADD COLUMN IF NOT EXISTS company_id INTEGER REFERENCES companies(id) ON DELETE CASCADE",
+            "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS area TEXT DEFAULT 'salg'",
         ]
         for m in migrations:
             try:
@@ -1160,6 +1161,8 @@ class handler(BaseHTTPRequestHandler):
                     q += " AND t.status = %s"; p.append(params["status"][0])
                 if "category" in params:
                     q += " AND t.category = %s"; p.append(params["category"][0])
+                if "area" in params:
+                    q += " AND COALESCE(t.area, 'salg') = %s"; p.append(params["area"][0])
                 if "overdue" in params:
                     q += " AND t.due_date < CURRENT_DATE AND t.status != 'done'"
                 q += " ORDER BY CASE t.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END, t.due_date ASC NULLS LAST, t.created_at DESC"
@@ -1433,6 +1436,7 @@ class handler(BaseHTTPRequestHandler):
 
                 active_tasks = [dict(r) for r in db.execute("""
                     SELECT t.id, t.title, t.category, t.status, t.priority, t.due_date,
+                           COALESCE(t.area, 'salg') AS area,
                            co.id AS company_id, co.name AS company_name,
                            u.name AS assigned_to_name
                     FROM tasks t JOIN companies co ON t.company_id = co.id
@@ -1444,9 +1448,19 @@ class handler(BaseHTTPRequestHandler):
                         t.id DESC
                 """).fetchall()]
 
+                tender_summary = [dict(r) for r in db.execute(
+                    "SELECT status, estimated_value, deadline FROM tenders").fetchall()]
+
+                tasks_done_30d = [dict(r) for r in db.execute("""
+                    SELECT COALESCE(area, 'salg') AS area, COUNT(*) AS cnt FROM tasks
+                    WHERE status = 'done' AND completed_at >= CURRENT_DATE - INTERVAL '30 days'
+                    GROUP BY COALESCE(area, 'salg')
+                """).fetchall()]
+
                 self._json_response({"scores": scores, "stats": stats, "all_tags": all_tags,
                                      "recent_activities": recent_activities, "active_tenders": active_tenders,
-                                     "active_tasks": active_tasks})
+                                     "active_tasks": active_tasks, "tender_summary": tender_summary,
+                                     "tasks_done_30d": tasks_done_30d})
 
             elif path == "/api/dashboard/scores":
                 scores = calculate_all_scores(db)
@@ -1669,10 +1683,11 @@ class handler(BaseHTTPRequestHandler):
             elif path == "/api/tasks":
                 cur = db.execute(
                     """INSERT INTO tasks (company_id,contact_id,assigned_to,created_by,category,
-                       title,description,status,priority,due_date) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                       title,description,status,priority,due_date,area) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
                     (body["company_id"], body.get("contact_id"), body.get("assigned_to"),
                      uid, body["category"], body["title"], body.get("description"),
-                     body.get("status","open"), body.get("priority","normal"), body.get("due_date")))
+                     body.get("status","open"), body.get("priority","normal"), body.get("due_date"),
+                     body.get("area") or "salg"))
                 new_id = cur.fetchone()["id"]
                 db.commit()
                 row = db.execute(
@@ -2090,14 +2105,14 @@ class handler(BaseHTTPRequestHandler):
                         e[k] = v
                 if body.get("status") == "done" and existing["status"] != "done":
                     e["completed_at"] = datetime.now().isoformat()
-                elif body.get("status") != "done":
+                elif "status" in body and body["status"] != "done":
                     e["completed_at"] = None
                 db.execute(
                     """UPDATE tasks SET contact_id=%s,assigned_to=%s,category=%s,title=%s,description=%s,
-                       status=%s,priority=%s,due_date=%s,completed_at=%s WHERE id=%s""",
+                       status=%s,priority=%s,due_date=%s,completed_at=%s,area=%s WHERE id=%s""",
                     (e.get("contact_id"), e.get("assigned_to"), e["category"], e["title"],
                      e.get("description"), e["status"], e["priority"], e.get("due_date"),
-                     e.get("completed_at"), tid))
+                     e.get("completed_at"), e.get("area") or "salg", tid))
                 db.commit()
                 log_audit(db, uid, "update", "task", tid, e["title"], {"status": e["status"]})
                 db.commit()

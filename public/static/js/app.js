@@ -1,7 +1,13 @@
 import { api } from './api.js?v=27';
 
 // ─── Constants ───
-const CATEGORY_LABELS = { opkald:'Opkald', tilbud:'Tilbud', moede:'Møde', opfølgning:'Opfølgning', demo:'Demo', kontrakt:'Kontrakt', generelt:'Generelt' };
+const CATEGORY_LABELS = { opkald:'Opkald', tilbud:'Tilbud', moede:'Møde', opfølgning:'Opfølgning', demo:'Demo', kontrakt:'Kontrakt', implementering:'Implementering', support:'Support', faktura:'Fakturering', budget:'Budget', generelt:'Generelt' };
+const AREA_LABELS = { salg:'Salg & marketing', leverance:'Leverance', oekonomi:'Økonomi' };
+const AREA_INTRO = {
+    salg: 'Relationer, tilbud, udbud og opfølgning på salg og marketing',
+    leverance: 'Implementering, drift og opfølgning hos kunderne',
+    oekonomi: 'Kontrakter, fakturering, budget og opfølgning på økonomi',
+};
 const PRIORITY_LABELS = { low:'Lav', normal:'Normal', high:'Høj', urgent:'Hastende' };
 const STATUS_LABELS = { open:'Åben', in_progress:'I gang', done:'Færdig' };
 const LI_ACTIVITY_LABELS = { post:'Opslag', comment:'Kommentar', like:'Like', share:'Deling', article:'Artikel' };
@@ -22,10 +28,9 @@ async function router() {
     const { path, parts } = getRoute();
     const content = document.getElementById('content');
 
+    const navKey = parts[0] === 'area' ? parts.slice(0, 2).join('/') : (parts[0] || '');
     document.querySelectorAll('.nav-link').forEach(link => {
-        const page = link.getAttribute('data-page');
-        const active = page === (parts[0] || '');
-        link.classList.toggle('active', active);
+        link.classList.toggle('active', link.getAttribute('data-page') === navKey);
     });
 
     try {
@@ -41,6 +46,8 @@ async function router() {
             await renderTaskDetail(content, parseInt(parts[1]));
         } else if (parts[0] === 'tasks') {
             await renderTasks(content);
+        } else if (parts[0] === 'area' && AREA_LABELS[parts[1]]) {
+            await renderTasks(content, parts[1]);
         } else if (parts[0] === 'users') {
             await renderUsers(content);
         } else if (parts[0] === 'settings') {
@@ -53,7 +60,7 @@ async function router() {
     }
 }
 
-window.addEventListener('hashchange', router);
+window.addEventListener('hashchange', () => { window.scrollTo(0, 0); router(); });
 window.addEventListener('load', () => {
     initUserSelector();
     initGlobalSearch();
@@ -648,32 +655,7 @@ async function renderDashboard(container) {
     container.innerHTML = '';
     container.className = 'ml-64 p-8 fade-in';
 
-    container.appendChild(h('div', { className: 'mb-8' },
-        h('h1', { className: 'text-2xl font-bold text-gray-900' }, 'Relations Dashboard'),
-        h('p', { className: 'text-gray-500 mt-1' }, 'Overblik over jeres relationer til forsyningsselskaber')
-    ));
-
-    // Stats cards
-    const statCards = h('div', { className: 'grid grid-cols-2 md:grid-cols-5 gap-4 mb-8' });
-    const statData = [
-        { label:'Virksomheder', value:stats.total, color:'text-gray-900', level: null },
-        { label:'Stærke', value:stats.strong, color:'text-green-600', level: 'staerk' },
-        { label:'Gode', value:stats.good, color:'text-yellow-600', level: 'god' },
-        { label:'Svage', value:stats.weak, color:'text-orange-600', level: 'svag' },
-        { label:'Kolde', value:stats.cold, color:'text-red-600', level: 'kold' },
-    ];
-    for (const s of statData) {
-        const clickable = s.level !== null;
-        statCards.appendChild(h('div', {
-            className: `bg-white rounded-xl shadow-sm border border-gray-200 p-5 ${clickable ? 'cursor-pointer hover:shadow-md hover:border-blue-300 transition-all' : ''}`,
-            onClick: clickable ? () => { _companiesLevelFilter = s.level; location.hash = '#/companies'; } : undefined
-        },
-            h('div', { className: `text-3xl font-bold ${s.color}` }, String(s.value)),
-            h('div', { className: 'text-sm text-gray-500 mt-1' }, s.label),
-            clickable ? h('div', { className: 'text-xs text-blue-500 mt-1' }, 'Vis liste \u2192') : null
-        ));
-    }
-    container.appendChild(statCards);
+    container.appendChild(renderCeoOverview(dashData));
 
     // ─── Active Tenders ───
     const activeTenders = dashData.active_tenders || [];
@@ -733,7 +715,7 @@ async function renderDashboard(container) {
         const taskSection = h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-8' },
             h('div', { className: 'flex items-center justify-between mb-4' },
                 h('div', { className: 'flex items-center gap-3' },
-                    h('h2', { className: 'text-lg font-bold text-gray-900' }, 'Igangværende sager'),
+                    h('h2', { className: 'text-lg font-bold text-gray-900' }, 'Åbne sager pr. virksomhed'),
                     h('span', { className: 'text-sm text-gray-400' }, `${activeTasks.length} aktive`)
                 ),
                 h('a', { href: '#/tasks', className: 'text-sm text-blue-600 hover:underline' }, 'Se alle')
@@ -747,15 +729,13 @@ async function renderDashboard(container) {
             const daysLeft = t.due_date ? Math.ceil((new Date(t.due_date) - new Date()) / 86400000) : null;
             taskGrid.appendChild(h('a', { href: `#/tasks/${t.id}`, className: 'block border border-gray-200 rounded-lg p-4 hover:border-blue-300 hover:shadow-sm transition-all' },
                 h('div', { className: 'flex items-start justify-between gap-2 mb-1' },
-                    h('div', { className: 'font-medium text-gray-900 text-sm flex-1 truncate' }, t.title),
+                    h('div', { className: 'font-semibold text-gray-900 flex-1 truncate' }, t.company_name),
                     t.priority === 'high' ? h('span', { className: 'inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700 flex-shrink-0' }, '↑ Høj') : null
                 ),
-                h('div', { className: 'flex items-center gap-2 mb-2' },
-                    h('span', { className: 'text-xs text-gray-500' }, t.company_name),
-                ),
+                h('div', { className: 'text-xs text-gray-500 truncate mb-2' }, t.title),
                 h('div', { className: 'flex items-center justify-between text-xs' },
                     h('div', { className: 'flex items-center gap-2' },
-                        h('span', { className: `badge badge-${t.category}` }, CATEGORY_LABELS[t.category] || t.category),
+                        h('span', { className: `area-pill area-${t.area || 'salg'}` }, AREA_LABELS[t.area || 'salg']),
                         h('span', { className: `inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${TASK_STATUS_COLORS[t.status] || 'bg-gray-100 text-gray-600'}` }, STATUS_LABELS[t.status] || t.status)
                     ),
                     t.due_date ? h('span', { className: isOverdue ? 'text-red-500 font-medium' : daysLeft <= 3 ? 'text-orange-500' : 'text-gray-400' },
@@ -834,6 +814,154 @@ async function renderDashboard(container) {
             h('div', { className: 'text-green-600 text-sm mt-1' }, 'Alle scorer er stabile eller stigende')
         ));
     }
+}
+
+// ─── CEO-overblik: Salg & marketing, Leverance, Økonomi ───
+function parseAmount(v) {
+    if (v == null || v === '') return 0;
+    const str = String(v).toLowerCase();
+    const num = parseFloat(str.replace(/[^\d,.\-]/g, '').replace(/\.(?=\d{3}(\D|$))/g, '').replace(',', '.'));
+    if (!isFinite(num)) return 0;
+    return /mio/.test(str) ? num * 1e6 : /t\.?kr|tkr|\bk\b/.test(str) ? num * 1e3 : num;
+}
+function formatAmount(n) {
+    if (!n) return '0';
+    if (n >= 1e6) return `${(n / 1e6).toLocaleString('da-DK', { maximumFractionDigits: 1 })} mio.`;
+    if (n >= 1e3) return `${Math.round(n / 1e3).toLocaleString('da-DK')} t.`;
+    return Math.round(n).toLocaleString('da-DK');
+}
+const AREA_ICONS = {
+    salg: 'M11 5.882V19.24a1.76 1.76 0 01-3.417.592l-2.147-6.15M18 13a3 3 0 100-6M5.436 13.683A4.001 4.001 0 017 6h1.832c4.1 0 7.625-1.234 9.168-3v14c-1.543-1.766-5.067-3-9.168-3H7a3.988 3.988 0 01-1.564-.317z',
+    leverance: 'M3 7h11v9H3zM14 10h4l3 3v3h-7M7.5 19a1.5 1.5 0 100-3 1.5 1.5 0 000 3zm10 0a1.5 1.5 0 100-3 1.5 1.5 0 000 3z',
+    oekonomi: 'M12 21a9 9 0 100-18 9 9 0 000 18zm0-14v10m3-8.5c-.7-.9-1.8-1.5-3-1.5-1.7 0-3 1-3 2.3 0 3.2 6 1.6 6 4.7 0 1.3-1.3 2.5-3 2.5-1.3 0-2.4-.6-3-1.5',
+};
+
+function renderCeoOverview(d) {
+    const wrap = h('div', {});
+    const today = new Date().toISOString().split('T')[0];
+    const tasks = d.active_tasks || [];
+    const tenders = d.active_tenders || [];
+    const summary = d.tender_summary || [];
+    const done30 = Object.fromEntries((d.tasks_done_30d || []).map(r => [r.area, r.cnt]));
+    const stats = d.stats || {};
+    const areaOf = t => t.area || 'salg';
+    const overdue = t => t.due_date && t.due_date < today;
+
+    const byArea = {};
+    for (const k of Object.keys(AREA_LABELS)) {
+        const list = tasks.filter(t => areaOf(t) === k);
+        byArea[k] = {
+            open: list.length,
+            overdue: list.filter(overdue).length,
+            high: list.filter(t => t.priority === 'high' || t.priority === 'urgent').length,
+            companies: new Set(list.map(t => t.company_id)).size,
+            done30: done30[k] || 0,
+        };
+    }
+    const overdueTenders = tenders.filter(t => t.deadline && t.deadline < today);
+    const pipeline = tenders.reduce((sum, t) => sum + parseAmount(t.estimated_value), 0);
+    const won = summary.filter(t => t.status === 'won');
+    const lost = summary.filter(t => t.status === 'lost' || t.status === 'dropped');
+    const wonValue = won.reduce((sum, t) => sum + parseAmount(t.estimated_value), 0);
+    const decided = won.length + lost.length;
+    const hitRate = decided ? Math.round(won.length / decided * 100) : null;
+
+    // Header
+    const now = new Date();
+    const dateTxt = now.toLocaleDateString('da-DK', { weekday: 'long', day: 'numeric', month: 'short', year: 'numeric' });
+    wrap.appendChild(h('div', { className: 'ov-head' },
+        h('h1', {}, 'Overblik'),
+        h('div', { className: 'ov-meta' },
+            `${dateTxt.charAt(0).toUpperCase()}${dateTxt.slice(1)}`, ' · ',
+            h('span', { className: 'live-dot' }),
+            `Opdateret ${now.toLocaleTimeString('da-DK', { hour: '2-digit', minute: '2-digit' })}`)
+    ));
+
+    const kpi = (v, l, sub, cls, href) => h('a', { className: `kpi ${cls || ''}`, href: href || '#/' },
+        h('div', { className: 'kpi-v' }, v), h('div', { className: 'kpi-l' }, l), h('div', { className: 'kpi-s' }, sub));
+    const areaCol = (key, label, tiles) => h('div', { className: 'ov-area' },
+        h('a', { className: 'ov-area-head', href: `#/area/${key}` },
+            h('span', { className: 'ov-ic', style: `background:var(--area-${key}-soft);color:var(--area-${key})`,
+                innerHTML: `<svg fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="${AREA_ICONS[key]}"/></svg>` }),
+            AREA_LABELS[key],
+            h('span', { className: 'ov-go' }, 'Åbn →')),
+        h('div', { className: 'ov-label' }, label),
+        h('div', { className: 'kpi-grid' }, ...tiles));
+
+    const A = byArea;
+    wrap.appendChild(h('div', { className: 'ov-areas' },
+        areaCol('salg', 'Pipeline & opfølgning', [
+            kpi(String(tenders.length), 'Aktive tilbud', overdueTenders.length ? `${overdueTenders.length} over deadline` : 'alle inden for deadline', overdueTenders.length ? 'warn' : '', '#/tenders'),
+            kpi(formatAmount(pipeline), 'Pipeline', 'kr. i aktive tilbud', '', '#/tenders'),
+            kpi(String(A.salg.open), 'Åbne sager', `${A.salg.companies} virksomheder`, '', '#/area/salg'),
+            kpi(String(A.salg.overdue), 'Forfaldne', 'kræver opfølgning', A.salg.overdue ? 'bad' : 'good', '#/area/salg'),
+        ]),
+        areaCol('leverance', 'Kunder & drift', [
+            kpi(String(won.length), 'Vundne aftaler', 'kunder i leverance', 'good', '#/tenders'),
+            kpi(String(A.leverance.open), 'Åbne sager', `${A.leverance.companies} virksomheder`, '', '#/area/leverance'),
+            kpi(String(A.leverance.overdue), 'Forfaldne', 'frist overskredet', A.leverance.overdue ? 'bad' : 'good', '#/area/leverance'),
+            kpi(String(A.leverance.done30), 'Løst', 'seneste 30 dage', '', '#/area/leverance'),
+        ]),
+        areaCol('oekonomi', 'Resultat & opfølgning', [
+            kpi(formatAmount(wonValue), 'Vundet værdi', 'kr. i vundne tilbud', 'good', '#/tenders'),
+            kpi(hitRate == null ? '–' : `${hitRate}%`, 'Hitrate', `${won.length} vundet · ${lost.length} tabt`, '', '#/tenders'),
+            kpi(String(A.oekonomi.open), 'Åbne sager', `${A.oekonomi.companies} virksomheder`, '', '#/area/oekonomi'),
+            kpi(String(A.oekonomi.overdue), 'Forfaldne', 'frist overskredet', A.oekonomi.overdue ? 'bad' : 'good', '#/area/oekonomi'),
+        ])
+    ));
+
+    // Relations banner (keeps the old score filters one click away)
+    const lvl = (n, label, level) => h('a', { href: '#/companies', className: 'hover:underline', onClick: () => { _companiesLevelFilter = level; } }, `${n} ${label}`);
+    wrap.appendChild(h('div', { className: 'ov-banner' },
+        h('span', { className: 'ov-ic', style: 'width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;background:var(--area-salg-soft);color:var(--area-salg)',
+            innerHTML: '<svg width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg>' }),
+        h('b', {}, 'Relationer:'),
+        h('span', {}, `${stats.total || 0} virksomheder · `),
+        h('span', { className: 'text-green-700' }, lvl(stats.strong || 0, 'stærke', 'staerk')), ' · ',
+        h('span', { className: 'text-yellow-700' }, lvl(stats.good || 0, 'gode', 'god')), ' · ',
+        h('span', { className: 'text-orange-700' }, lvl(stats.weak || 0, 'svage', 'svag')), ' · ',
+        h('span', { className: 'text-red-600 font-semibold' }, lvl(stats.cold || 0, 'kolde', 'kold')),
+        h('span', { className: 'text-gray-400 text-sm' }, `gns. score ${stats.avg_score || 0}/100`),
+        h('a', { href: '#/companies', className: 'ov-go' }, 'Se virksomheder →')
+    ));
+
+    // Requires action + flow
+    const actions = [
+        ...tasks.filter(overdue).map(t => ({ days: Math.ceil((new Date(today) - new Date(t.due_date)) / 86400000), co: t.company_name, sub: t.title, area: areaOf(t), href: `#/tasks/${t.id}` })),
+        ...overdueTenders.map(t => ({ days: Math.ceil((new Date(today) - new Date(t.deadline)) / 86400000), co: t.company_name, sub: `Tilbud: ${t.title}`, area: 'salg', href: `#/tenders/${t.id}` })),
+    ].sort((a, b) => b.days - a.days);
+    const highOpen = tasks.filter(t => !overdue(t) && (t.priority === 'high' || t.priority === 'urgent'))
+        .map(t => ({ days: null, co: t.company_name, sub: t.title, area: areaOf(t), href: `#/tasks/${t.id}` }));
+    const actionList = [...actions, ...highOpen].slice(0, 8);
+
+    const actPanel = h('div', { className: 'ov-panel' },
+        h('h2', {}, h('span', { className: 'ov-dot' }), 'Kræver handling',
+            h('span', { className: 'text-sm font-normal text-gray-400' }, `${actions.length} forfaldne · ${highOpen.length} høj prioritet`)));
+    if (actionList.length === 0) {
+        actPanel.appendChild(h('div', { className: 'text-gray-400 text-sm py-6 text-center' }, 'Intet forfaldent — godt gået.'));
+    }
+    for (const a of actionList) {
+        actPanel.appendChild(h('a', { className: 'act-row', href: a.href },
+            h('span', { className: `area-pill area-${a.area}`, style: 'padding:2px 8px', title: AREA_LABELS[a.area] }, ''),
+            h('div', { className: 'min-w-0' },
+                h('div', { className: 'act-co truncate' }, a.co),
+                h('div', { className: 'act-sub truncate' }, a.sub)),
+            h('span', { className: 'act-tag', style: `color:${a.days ? 'var(--bad)' : 'var(--warn)'}` }, a.days ? `${a.days}d over frist` : 'Høj prioritet')
+        ));
+    }
+
+    const maxOpen = Math.max(1, ...Object.values(byArea).map(x => x.open));
+    const flowPanel = h('div', { className: 'ov-panel' }, h('h2', {}, 'Åbne sager pr. område'),
+        ...Object.keys(AREA_LABELS).map(k => h('a', { href: `#/area/${k}`, className: 'flow-row', style: `--fc:var(--area-${k})` },
+            h('span', { className: 'text-gray-800' }, AREA_LABELS[k]),
+            h('div', { className: 'flow-bar' }, h('i', { style: `width:${Math.max(2, byArea[k].open / maxOpen * 100)}%` })),
+            h('span', { className: 'flow-n' }, String(byArea[k].open)))),
+        h('div', { className: 'text-sm text-gray-500 mt-4' },
+            `${tasks.length} åbne sager hos ${new Set(tasks.map(t => t.company_id)).size} virksomheder · `,
+            `${Object.values(byArea).reduce((s2, x) => s2 + x.done30, 0)} løst de seneste 30 dage`)
+    );
+    wrap.appendChild(h('div', { className: 'grid grid-cols-1 lg:grid-cols-2 gap-5 mb-8' }, flowPanel, actPanel));
+    return wrap;
 }
 
 function renderActivityFeed(activities, currentDays, currentFromDate, onPeriodChange) {
@@ -2208,6 +2336,7 @@ function showInteractionFormWithContactPicker(contacts, users, companyId = null)
 }
 
 // ─── Task Form ───
+let _newTaskArea = null; // preselected area when creating a sag from an area page
 async function showTaskForm(companyId, contacts, users, existing = null) {
     const isEdit = !!existing;
     let allCompanies = [];
@@ -2222,6 +2351,7 @@ async function showTaskForm(companyId, contacts, users, existing = null) {
             company_id: companyId || parseInt(fd.get('company_id')),
             title: fd.get('title'),
             category: fd.get('category'),
+            area: fd.get('area'),
             description: fd.get('description') || null,
             priority: fd.get('priority'),
             due_date: fd.get('due_date') || null,
@@ -2235,6 +2365,14 @@ async function showTaskForm(companyId, contacts, users, existing = null) {
         } catch (err) { alert(err.message); }
     }},
         formField('Titel *', 'title', existing?.title || '', 'text', true),
+        h('div', {},
+            h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, 'Område *'),
+            h('select', { name:'area', className:'w-full border border-gray-300 rounded-lg px-3 py-2', required:'' },
+                ...Object.entries(AREA_LABELS).map(([k, v]) =>
+                    h('option', { value: k, ...((existing?.area || _newTaskArea || 'salg') === k ? { selected:'' } : {}) }, v)
+                )
+            )
+        ),
         h('div', { className: 'grid grid-cols-2 gap-3' },
             h('div', {},
                 h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, 'Kategori *'),
@@ -3168,15 +3306,17 @@ async function renderTaskDetail(container, id) {
     function renderView() {
         container.innerHTML = '';
         container.appendChild(h('div', { className: 'mb-6' },
-            h('a', { href: '#/tasks', className: 'text-sm text-blue-600 hover:underline mb-2 inline-block' }, '\u2190 Alle sager'),
+            h('a', { href: `#/area/${task.area || 'salg'}`, className: 'text-sm text-blue-600 hover:underline mb-2 inline-block' }, `\u2190 ${AREA_LABELS[task.area || 'salg']}`),
             h('div', { className: 'flex justify-between items-start' },
                 h('div', {},
-                    h('h1', { className: 'text-2xl font-bold text-gray-900' }, task.title),
+                    h('h1', { className: 'text-2xl font-bold text-gray-900' },
+                        h('a', { href: `#/companies/${task.company_id}`, className: 'hover:underline' }, task.company_name)),
+                    h('div', { className: 'text-base text-gray-500 mt-1' }, task.title),
                     h('div', { className: 'flex flex-wrap gap-2 mt-2' },
+                        h('span', { className: `area-pill area-${task.area || 'salg'}` }, AREA_LABELS[task.area || 'salg']),
                         h('span', { className: `badge badge-${task.category}` }, CATEGORY_LABELS[task.category] || task.category),
                         h('span', { className: `text-xs priority-${task.priority}` }, PRIORITY_LABELS[task.priority] || task.priority),
                         h('span', { className: `text-xs px-2 py-0.5 rounded-full font-medium ${task.status === 'done' ? 'bg-green-100 text-green-700' : task.status === 'in_progress' ? 'bg-yellow-100 text-yellow-700' : 'bg-blue-100 text-blue-700'}` }, STATUS_LABELS[task.status] || task.status),
-                        task.company_name ? h('a', { href: `#/companies/${task.company_id}`, className: 'text-sm text-blue-600 hover:underline' }, task.company_name) : null,
                         task.due_date ? h('span', { className: 'text-sm text-gray-500' }, `Frist: ${formatDate(task.due_date)}`) : null
                     )
                 ),
@@ -3242,6 +3382,7 @@ async function renderTaskDetail(container, id) {
                 const fd = new FormData(form);
                 await api.updateTask(id, {
                     title: fd.get('title'),
+                    area: fd.get('area'),
                     category: fd.get('category'),
                     priority: fd.get('priority'),
                     status: fd.get('status'),
@@ -3255,6 +3396,9 @@ async function renderTaskDetail(container, id) {
             h('h2', { className: 'text-base font-semibold text-gray-900 mb-5' }, 'Rediger sag'),
             h('div', { className: 'space-y-4' },
                 fld('Titel', h('input', { type: 'text', name: 'title', value: task.title || '', required: true, className: iCls })),
+                fld('Område', h('select', { name: 'area', className: iCls },
+                    ...Object.entries(AREA_LABELS).map(([k, v]) => h('option', { value: k, ...((task.area || 'salg') === k ? { selected: '' } : {}) }, v))
+                )),
                 h('div', { className: 'grid grid-cols-2 md:grid-cols-4 gap-4' },
                     fld('Kategori', h('select', { name: 'category', className: iCls },
                         ...Object.entries(CATEGORY_LABELS).map(([k, v]) => h('option', { value: k, ...(task.category === k ? { selected: '' } : {}) }, v))
@@ -3289,78 +3433,113 @@ async function renderTaskDetail(container, id) {
     renderView();
 }
 
-async function renderTasks(container) {
+async function renderTasks(container, area = null) {
     container.innerHTML = '<div class="text-gray-400">Indlæser...</div>';
-    const [tasks, summary, users] = await Promise.all([api.getTasks(), api.getTaskSummary(), api.getUsers()]);
+    const [allTasks, users] = await Promise.all([api.getTasks(), api.getUsers()]);
     container.innerHTML = '';
     container.className = 'ml-64 p-8 fade-in';
 
+    const today = new Date().toISOString().split('T')[0];
+    const areaOf = t => t.area || 'salg';
+    const tasks = area ? allTasks.filter(t => areaOf(t) === area) : allTasks;
+    const isOverdue = t => t.due_date && t.due_date < today && t.status !== 'done';
+    const showDone = sessionStorage.getItem('tasksShowDone') === '1';
+
     container.appendChild(h('div', { className: 'flex justify-between items-center mb-6' },
         h('div', {},
-            h('h1', { className: 'text-2xl font-bold text-gray-900' }, 'Sager'),
-            h('p', { className: 'text-gray-500 mt-1' }, 'Opgaver og opfølgninger')
+            h('h1', { className: 'text-2xl font-bold text-gray-900 flex items-center gap-3' },
+                area ? h('span', { className: `area-pill area-${area}`, style: 'font-size:.8rem' }, 'Område') : null,
+                area ? AREA_LABELS[area] : 'Alle sager'),
+            h('p', { className: 'text-gray-500 mt-1' }, area ? AREA_INTRO[area] : 'Opfølgning pr. virksomhed på tværs af salg, leverance og økonomi')
         ),
         h('button', {
             className: 'bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors font-medium',
-            onClick: () => showTaskForm(null, [], users)
+            onClick: () => { _newTaskArea = area; showTaskForm(null, [], users); }
         }, '+ Ny sag')
     ));
 
-    // Summary cards
-    const sumCards = h('div', { className: 'grid grid-cols-2 md:grid-cols-5 gap-4 mb-6' });
-    const sumData = [
-        { label:'Aabne', value: summary.open, color:'text-blue-600' },
-        { label:'I gang', value: summary.in_progress, color:'text-yellow-600' },
-        { label:'Færdige', value: summary.done, color:'text-green-600' },
-        { label:'Forfaldne', value: summary.overdue, color:'text-red-600' },
-        { label:'Denne uge', value: summary.this_week, color:'text-purple-600' },
-    ];
-    for (const s of sumData) {
-        sumCards.appendChild(h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-4' },
-            h('div', { className: `text-2xl font-bold ${s.color}` }, String(s.value)),
-            h('div', { className: 'text-sm text-gray-500' }, s.label)
-        ));
-    }
-    container.appendChild(sumCards);
+    // Area tabs
+    const tabs = h('div', { className: 'area-tabs' },
+        ...[[null, 'Alle'], ...Object.entries(AREA_LABELS)].map(([k, v]) => {
+            const n = k ? allTasks.filter(t => areaOf(t) === k && t.status !== 'done').length : allTasks.filter(t => t.status !== 'done').length;
+            return h('button', { className: (k || null) === area ? 'on' : '', onClick: () => { location.hash = k ? `#/area/${k}` : '#/tasks'; } }, `${v} · ${n}`);
+        })
+    );
+    const doneToggle = h('label', { className: 'flex items-center gap-2 text-sm text-gray-600 cursor-pointer' },
+        h('input', { type: 'checkbox', ...(showDone ? { checked: '' } : {}), onChange: (e) => { sessionStorage.setItem('tasksShowDone', e.target.checked ? '1' : '0'); router(); } }),
+        'Vis færdige sager');
+    container.appendChild(h('div', { className: 'flex flex-wrap items-center justify-between gap-3 mb-5' }, tabs, doneToggle));
 
-    // Task list
+    // KPI tiles
+    const open = tasks.filter(t => t.status !== 'done');
+    const companiesWithOpen = new Set(open.map(t => t.company_id)).size;
+    const kpis = [
+        { v: companiesWithOpen, l: 'Virksomheder', s: 'med åbne sager', cls: '' },
+        { v: open.filter(t => t.status === 'open').length, l: 'Åbne', s: 'ikke startet', cls: '' },
+        { v: open.filter(t => t.status === 'in_progress').length, l: 'I gang', s: 'under behandling', cls: 'warn' },
+        { v: open.filter(isOverdue).length, l: 'Forfaldne', s: 'frist overskredet', cls: 'bad' },
+        { v: tasks.filter(t => t.status === 'done').length, l: 'Færdige', s: 'i alt', cls: 'good' },
+    ];
+    container.appendChild(h('div', { className: 'grid grid-cols-2 md:grid-cols-5 gap-3 mb-6' },
+        ...kpis.map(k => h('div', { className: `kpi ${k.cls}`, style: 'cursor:default;background:#fff;box-shadow:var(--shadow)' },
+            h('div', { className: 'kpi-v' }, String(k.v)),
+            h('div', { className: 'kpi-l' }, k.l),
+            h('div', { className: 'kpi-s' }, k.s)))
+    ));
+
+    // Group by company — the company is the unit we follow up on
+    const visible = showDone ? tasks : open;
+    const groups = new Map();
+    for (const t of visible) {
+        if (!groups.has(t.company_id)) groups.set(t.company_id, { id: t.company_id, name: t.company_name, tasks: [] });
+        groups.get(t.company_id).tasks.push(t);
+    }
+    const STATUS_ORDER = { in_progress: 0, open: 1, done: 2 };
+    const groupList = [...groups.values()].map(g => {
+        g.tasks.sort((a, b) => (STATUS_ORDER[a.status] - STATUS_ORDER[b.status]) || String(a.due_date || '9999').localeCompare(String(b.due_date || '9999')));
+        g.overdue = g.tasks.filter(isOverdue).length;
+        g.open = g.tasks.filter(t => t.status !== 'done').length;
+        g.nextDue = g.tasks.filter(t => t.status !== 'done' && t.due_date).map(t => t.due_date).sort()[0] || '9999';
+        return g;
+    }).sort((a, b) => (b.overdue - a.overdue) || a.nextDue.localeCompare(b.nextDue) || String(a.name).localeCompare(String(b.name), 'da'));
+
     const taskList = h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden' });
-    if (tasks.length === 0) {
-        taskList.appendChild(h('div', { className: 'p-8 text-center text-gray-400' }, 'Ingen sager.'));
-    } else {
-        // Group by status
-        for (const status of ['open', 'in_progress', 'done']) {
-            const group = tasks.filter(t => t.status === status);
-            if (group.length === 0) continue;
-            taskList.appendChild(h('div', { className: 'px-6 py-2 bg-gray-50 border-b text-xs font-semibold text-gray-500 uppercase' },
-                `${STATUS_LABELS[status]} (${group.length})`
+    if (groupList.length === 0) {
+        taskList.appendChild(h('div', { className: 'p-8 text-center text-gray-400' }, area ? `Ingen åbne sager inden for ${AREA_LABELS[area].toLowerCase()}.` : 'Ingen åbne sager.'));
+    }
+    for (const g of groupList) {
+        const areas = [...new Set(g.tasks.map(areaOf))];
+        taskList.appendChild(h('div', { className: 'co-group-head' },
+            h('a', { href: `#/companies/${g.id}` }, g.name),
+            h('span', { className: 'text-sm text-gray-500' }, `${g.open} ${g.open === 1 ? 'åben sag' : 'åbne sager'}`),
+            g.overdue ? h('span', { className: 'text-sm font-semibold text-red-600' }, `${g.overdue} forfalden${g.overdue === 1 ? '' : 'e'}`) : null,
+            !area ? h('span', { className: 'ml-auto flex gap-1' }, ...areas.map(a => h('span', { className: `area-pill area-${a}` }, AREA_LABELS[a]))) : null
+        ));
+        for (const t of g.tasks) {
+            const overdue = isOverdue(t);
+            taskList.appendChild(h('div', {
+                className: `flex items-center gap-4 pl-10 pr-6 py-3 border-b border-gray-100 hover:bg-gray-50 cursor-pointer ${overdue ? 'task-overdue' : ''}`,
+                onClick: () => { location.hash = `#/tasks/${t.id}`; }
+            },
+                h('button', {
+                    className: `w-5 h-5 rounded border-2 flex-shrink-0 ${t.status === 'done' ? 'bg-green-500 border-green-500' : 'border-gray-300 hover:border-green-500'}`,
+                    onClick: async (e) => {
+                        e.stopPropagation();
+                        await api.updateTask(t.id, { status: t.status === 'done' ? 'open' : 'done' }); router();
+                    }
+                }, t.status === 'done' ? h('span', { className: 'text-white text-xs flex items-center justify-center', innerHTML: '✓' }) : null),
+                h('div', { className: 'flex-1 min-w-0' },
+                    h('div', { className: `${t.status === 'done' ? 'text-gray-400 line-through' : 'text-gray-800'}` }, t.title),
+                    h('div', { className: 'flex flex-wrap items-center gap-2 mt-1' },
+                        !area ? h('span', { className: `area-pill area-${areaOf(t)}` }, AREA_LABELS[areaOf(t)]) : null,
+                        h('span', { className: `badge badge-${t.category}` }, CATEGORY_LABELS[t.category] || t.category),
+                        t.status === 'in_progress' ? h('span', { className: 'text-xs px-2 py-0.5 rounded-full font-medium bg-yellow-100 text-yellow-700' }, STATUS_LABELS[t.status]) : null,
+                        h('span', { className: `text-xs ${PRIORITY_LABELS[t.priority] ? 'priority-' + t.priority : ''}` }, PRIORITY_LABELS[t.priority] || t.priority),
+                        t.assigned_to_name ? h('span', { className: 'text-xs text-gray-500' }, t.assigned_to_name) : null,
+                    )
+                ),
+                t.due_date ? h('div', { className: `text-sm ${overdue ? 'text-red-600 font-medium' : 'text-gray-400'}` }, formatDate(t.due_date)) : null
             ));
-            for (const t of group) {
-                const isOverdue = t.due_date && t.due_date < new Date().toISOString().split('T')[0] && t.status !== 'done';
-                const row = h('div', { className: `flex items-center gap-4 px-6 py-4 border-b border-gray-100 hover:bg-gray-50 cursor-pointer ${isOverdue ? 'task-overdue' : ''}`,
-                    onClick: () => { location.hash = `#/tasks/${t.id}`; }
-                },
-                    h('button', {
-                        className: `w-5 h-5 rounded border-2 flex-shrink-0 ${t.status === 'done' ? 'bg-green-500 border-green-500' : 'border-gray-300 hover:border-green-500'}`,
-                        onClick: async (e) => {
-                            e.stopPropagation();
-                            const newStatus = t.status === 'done' ? 'open' : 'done';
-                            await api.updateTask(t.id, { status: newStatus }); router();
-                        }
-                    }, t.status === 'done' ? h('span', { className: 'text-white text-xs flex items-center justify-center', innerHTML: '\u2713' }) : null),
-                    h('div', { className: 'flex-1 min-w-0' },
-                        h('div', { className: `font-medium ${t.status === 'done' ? 'text-gray-400 line-through' : 'text-gray-900'}` }, t.title),
-                        t.company_name ? h('a', { href: `#/companies/${t.company_id}`, className: 'text-sm font-medium text-blue-700 hover:underline block mt-0.5', onClick: e => e.stopPropagation() }, t.company_name) : null,
-                        h('div', { className: 'flex flex-wrap gap-2 mt-1' },
-                            h('span', { className: `badge badge-${t.category}` }, CATEGORY_LABELS[t.category] || t.category),
-                            h('span', { className: `text-xs ${PRIORITY_LABELS[t.priority] ? 'priority-' + t.priority : ''}` }, PRIORITY_LABELS[t.priority] || t.priority),
-                            t.assigned_to_name ? h('span', { className: 'text-xs text-gray-500' }, t.assigned_to_name) : null,
-                        )
-                    ),
-                    t.due_date ? h('div', { className: `text-sm ${isOverdue ? 'text-red-500 font-medium' : 'text-gray-400'}` }, formatDate(t.due_date)) : null
-                );
-                taskList.appendChild(row);
-            }
         }
     }
     container.appendChild(taskList);

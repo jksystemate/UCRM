@@ -3086,14 +3086,16 @@ async function showTenderForm(users, existing = null, prefillCompanyId = null) {
         routeField.innerHTML = '';
         routeField.append(
             h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, 'Købsvej'),
-            mine.length ? h('div', { className: 'text-xs text-gray-500 mb-2' }, `${company.name} er medlem af ${mine.map(m => m.name).join(' og ')}. Går de selv, eller med fællesskabet?`) : null,
+            ...(mine.length ? [h('div', { className: 'text-xs text-gray-500 mb-2' }, `${company.name} er medlem af ${mine.map(m => m.name).join(' og ')}. Går de selv, eller med fællesskabet?`)] : []),
             h('div', { className: 'flex gap-4 items-center flex-wrap' },
-                h('label', { className: 'flex items-center gap-2 text-sm' }, h('input', { type: 'radio', name: 'purchase_route', value: 'selv', ...(route === 'selv' ? { checked: '' } : {}) }), 'Kunden selv'),
-                h('label', { className: 'flex items-center gap-2 text-sm' }, h('input', { type: 'radio', name: 'purchase_route', value: 'faellesskab', ...(route === 'faellesskab' ? { checked: '' } : {}) }), 'Via fællesskab'),
-                h('select', { name: 'via_group_id', className: 'border border-gray-300 rounded-lg px-2 py-1.5 text-sm' },
-                    h('option', { value: '' }, 'Vælg fællesskab…'),
-                    ...mine.map(g => h('option', { value: g.id, ...(String(chosen) === String(g.id) ? { selected: '' } : {}) }, `${g.name} (medlem)`)),
-                    ...others.map(g => h('option', { value: g.id, ...(String(chosen) === String(g.id) ? { selected: '' } : {}) }, g.name)))));
+                h('label', { className: 'flex items-center gap-2 text-sm' }, h('input', { type: 'radio', name: 'purchase_route', value: 'selv', ...(route === 'selv' || !groups.length ? { checked: '' } : {}) }), 'Kunden selv'),
+                ...(groups.length ? [
+                    h('label', { className: 'flex items-center gap-2 text-sm' }, h('input', { type: 'radio', name: 'purchase_route', value: 'faellesskab', ...(route === 'faellesskab' ? { checked: '' } : {}) }), 'Via fællesskab'),
+                    h('select', { name: 'via_group_id', className: 'border border-gray-300 rounded-lg px-2 py-1.5 text-sm' },
+                        h('option', { value: '' }, 'Vælg fællesskab…'),
+                        ...mine.map(g => h('option', { value: g.id, ...(String(chosen) === String(g.id) ? { selected: '' } : {}) }, `${g.name} (medlem)`)),
+                        ...others.map(g => h('option', { value: g.id, ...(String(chosen) === String(g.id) ? { selected: '' } : {}) }, g.name)))
+                ] : [h('span', { className: 'text-xs text-gray-400' }, 'Ingen indkøbsfællesskaber oprettet endnu')])));
     };
     drawRoute(existing?.company_id || prefillCompanyId);
 
@@ -3158,7 +3160,9 @@ async function showTenderForm(users, existing = null, prefillCompanyId = null) {
         ),
         h('div', { className: 'grid grid-cols-2 gap-3' },
             formField('Estimeret værdi', 'estimated_value', existing?.estimated_value || ''),
-            formField('Portallink', 'portal_link', existing?.portal_link || '', 'url')
+            h('div', {},
+                h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, 'Link til udbudsportal'),
+                h('input', { type: 'url', name: 'portal_link', value: existing?.portal_link || '', placeholder: 'fx Mercell, EU-Supply eller Ethics', className: 'w-full border border-gray-300 rounded-lg px-3 py-2' }))
         ),
         h('div', {},
             h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, 'Beskrivelse'),

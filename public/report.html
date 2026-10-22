@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="da">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="robots" content="noindex">
+    <title>Indrapportering · SystemateCEO</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #eef2f5; --surface: #fff; --surface2: #f4f7fa; --border: #d9e2e9;
+            --accent: #194b66; --accent2: #4f7c99; --accent-soft: #dcebf6; --gold: #c3a95c;
+            --text: #12222d; --muted: #788a96; --light: #475a67;
+            --good: #2c7a4b; --good-soft: #dcefe3; --warn: #b26b0a; --warn-soft: #f6e8cf; --bad: #b83a33; --bad-soft: #f5dcd9;
+            --shadow: 0 1px 2px rgba(20,32,29,.05), 0 4px 16px rgba(20,32,29,.05);
+            --font: 'Schibsted Grotesk', ui-sans-serif, -apple-system, 'Helvetica Neue', Arial, sans-serif;
+        }
+        * { box-sizing: border-box; }
+        html, body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--font); -webkit-font-smoothing: antialiased; }
+        button, input, textarea, select { font: inherit; color: inherit; }
+        .top { position: sticky; top: 0; z-index: 10; background: rgba(255,255,255,.92); backdrop-filter: blur(10px); border-bottom: 1px solid var(--border); }
+        .top-in { max-width: 760px; margin: 0 auto; padding: 12px 16px; display: flex; align-items: center; gap: 12px; }
+        .brand { font-weight: 700; font-size: 19px; color: var(--accent); letter-spacing: -.02em; }
+        .brand b { color: var(--gold); font-weight: 800; }
+        .saved { margin-left: auto; font-size: 13px; color: var(--muted); }
+        .bar { height: 4px; background: var(--surface2); }
+        .bar i { display: block; height: 100%; background: var(--good); transition: width .3s; }
+        main { max-width: 760px; margin: 0 auto; padding: 20px 16px 120px; }
+        h1 { font-size: 26px; letter-spacing: -.02em; margin: 4px 0 6px; }
+        .intro { color: var(--light); line-height: 1.5; margin: 0 0 6px; }
+        .sec { margin: 28px 0 10px; font-size: 12px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+        .card { background: var(--surface); border: 1px solid #e1e8ee; border-radius: 14px; box-shadow: var(--shadow); padding: 16px; margin-bottom: 12px; border-left: 4px solid var(--border); }
+        .card.done { border-left-color: var(--good); }
+        .card-h { display: flex; align-items: flex-start; gap: 10px; }
+        .card-t { font-weight: 700; font-size: 18px; line-height: 1.25; flex: 1; }
+        .check { width: 24px; height: 24px; border-radius: 50%; background: var(--surface2); border: 2px solid var(--border); flex-shrink: 0; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 13px; font-weight: 800; }
+        .card.done .check { background: var(--good); border-color: var(--good); }
+        .facts { margin: 8px 0 4px; display: flex; flex-direction: column; gap: 3px; font-size: 13.5px; color: var(--light); }
+        .facts .late { color: var(--bad); font-weight: 600; }
+        .prev { margin: 8px 0; padding: 8px 10px; background: var(--surface2); border-radius: 8px; font-size: 13px; color: var(--light); }
+        .hint { color: var(--light); font-size: 14px; margin: 6px 0 2px; }
+        label.l { display: block; font-size: 13px; font-weight: 600; color: var(--light); margin: 12px 0 5px; }
+        input[type=text], input[type=number], input[type=date], textarea { width: 100%; border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: #fff; font-size: 16px; }
+        textarea { min-height: 70px; resize: vertical; }
+        input:focus, textarea:focus { outline: none; border-color: var(--accent2); box-shadow: 0 0 0 3px var(--accent-soft); }
+        .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+        .chip { border: 1px solid var(--border); background: #fff; border-radius: 999px; padding: 8px 13px; font-size: 14px; font-weight: 500; cursor: pointer; }
+        .chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+        .chip.on.good { background: var(--good); border-color: var(--good); }
+        .chip.on.warn { background: var(--warn); border-color: var(--warn); }
+        .chip.on.bad { background: var(--bad); border-color: var(--bad); }
+        .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        .row2b { display: grid; grid-template-columns: 1fr 160px; gap: 10px; }
+        @media (max-width: 480px) { .row2b { grid-template-columns: 1fr; } }
+        .ghost { background: none; border: 1px solid var(--border); border-radius: 8px; padding: 7px 11px; font-size: 13px; font-weight: 600; color: var(--accent); cursor: pointer; }
+        .nr { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 14px; color: var(--light); }
+        .collapsed .body { display: none; }
+        .foot { position: fixed; left: 0; right: 0; bottom: 0; background: rgba(255,255,255,.95); backdrop-filter: blur(10px); border-top: 1px solid var(--border); padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); }
+        .foot-in { max-width: 760px; margin: 0 auto; display: flex; align-items: center; gap: 12px; }
+        .btn { background: var(--accent); color: #fff; border: none; border-radius: 12px; padding: 13px 22px; font-size: 16px; font-weight: 700; cursor: pointer; margin-left: auto; }
+        .btn:disabled { opacity: .5; }
+        .msg { text-align: center; padding: 60px 20px; }
+        .msg h1 { font-size: 28px; }
+        .err { color: var(--bad); font-size: 13px; margin-top: 6px; }
+        .practice { display: inline-block; margin: 6px 0 4px; padding: 5px 10px; border-radius: 8px; background: var(--warn-soft); color: var(--warn); font-size: 13px; font-weight: 600; }
+        label.q { display: flex; gap: 8px; font-size: 15px; font-weight: 500; color: var(--text); line-height: 1.4; margin-top: 16px; }
+        .fu { margin-top: 16px; padding: 12px 14px; border-radius: 10px; background: #fbf6ee; border: 1px solid #ecd29f; }
+        .fu-h { font-size: 11.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--warn); }
+        .fu-q { font-size: 15px; font-weight: 600; margin: 4px 0 8px; line-height: 1.4; }
+        .fu-skip { background: none; border: none; color: var(--muted); font-size: 13px; margin-top: 6px; cursor: pointer; text-decoration: underline; }
+        .fu-wait { margin-top: 12px; font-size: 13px; color: var(--muted); }
+        .later-btn { flex-shrink: 0; background: none; border: 1px solid var(--border); border-radius: 8px; padding: 5px 9px; font-size: 12.5px; font-weight: 600; color: var(--muted); cursor: pointer; }
+        .card.later { border-left-color: var(--accent2); }
+        .card.later .body, .card.later .facts, .card.later .prev, .card.later .hint, .card.later .mx { display: none; }
+        .later-note { display: none; margin-top: 8px; font-size: 13.5px; color: var(--light); }
+        .card.later .later-note { display: block; }
+        .mx { margin-top: 10px; display: flex; flex-direction: column; }
+        .mx-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-top: 1px solid var(--surface2); flex-wrap: wrap; }
+        .mx .chips { gap: 5px; }
+        .mx .chip { padding: 6px 11px; font-size: 13.5px; }
+        .mx-name { flex: 1; min-width: 160px; display: flex; flex-direction: column; }
+        .mx-name small { color: var(--muted); font-size: 12.5px; line-height: 1.3; }
+        .mx-name .mx-cur { color: var(--accent2); }
+        .mx-sel { border: 1px solid var(--border); border-radius: 10px; padding: 9px 10px; font-size: 15px; background: #fff; min-width: 200px; }
+        .mx-sel.set { border-color: var(--accent); background: var(--accent-soft); }
+        .mx-note { width: 100%; margin: 0 0 8px; border: 1px solid var(--border); border-radius: 10px; padding: 9px 12px; font-size: 15px; }
+        .qn { flex-shrink: 0; width: 22px; height: 22px; border-radius: 6px; background: var(--accent-soft); color: var(--accent); font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center; margin-top: 1px; }
+    </style>
+</head>
+<body>
+    <div class="top"><div class="top-in"><span class="brand">systemate<b>CEO</b></span><span class="saved" id="saved"></span></div><div class="bar"><i id="bar" style="width:0"></i></div></div>
+    <main id="app"><p class="intro">Indlæser…</p></main>
+    <div class="foot" id="foot" hidden><div class="foot-in"><span id="count" style="font-size:14px;color:var(--light)"></span><button class="btn" id="submit">Indsend</button></div></div>
+    <script type="module" src="/static/js/report.js?v=5"></script>
+</body>
+</html>

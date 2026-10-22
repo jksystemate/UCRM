@@ -45,6 +45,78 @@ def _json_default(obj):
         return float(obj)
     raise TypeError(f"Type {type(obj)} not serializable")
 
+DEFAULT_SALES_PROCESS = """Vi sælger software til forsynings- og energiselskaber. Vi har typisk to forløb:
+
+Direkte salg: indledende møder → produktdemo → besvarelse af spørgsmål (nogle gange ud fra kundens kravspec) → tilbud med pris og tidsplan → forhandling → kontrakt.
+
+Udbud: samme forløb, men med en meget formel kravbesvarelse, faste frister og en evaluering.
+
+Når jeg følger op, vil jeg altid vide: hvor i forløbet er kunden, hvad er næste skridt og hvornår, hvem beslutter, hvem konkurrerer vi mod, og hvad skal der til for at komme videre."""
+
+# Faste spørgsmål pr. område ud over kunder og mål (formuleret som CEO'en ville stille dem)
+REPORT_QUESTIONS = {
+    "salg": [
+        ("marketing", "Marketing de sidste 14 dage",
+         {"hint": "Hvilke aktiviteter har vi haft, hvad kom der ud af dem, og hvad er planen for de næste 14 dage?"}),
+        ("question", "Andet jeg bør vide?",
+         {"hint": "Fx nye muligheder, konkurrenter, eller hvor du har brug for hjælp."}),
+    ],
+    "leverance": [
+        ("question", "Leverancer de sidste 14 dage",
+         {"hint": "Hvad er leveret, hvad er forsinket, og hvorfor?"}),
+        ("question", "Kapacitet og ressourcer",
+         {"hint": "Har vi folk nok til det, der er lovet de næste 4–8 uger? Hvor er flaskehalsen?"}),
+        ("question", "Kvalitet og kundetilfredshed",
+         {"hint": "Fejl, klager eller ros siden sidst. Er der kunder, der er utilfredse?"}),
+        ("question", "Andet jeg bør vide?", {"hint": "Risici eller beslutninger du har brug for."}),
+    ],
+    "oekonomi": [
+        ("question", "Likviditet",
+         {"hint": "Hvordan ser likviditeten ud nu og de næste 3 måneder? Noget, der skal handles på?"}),
+        ("question", "Fakturering og debitorer",
+         {"hint": "Er alt faktureret, der kan faktureres? Hvilke kunder skylder over forfald?"}),
+        ("question", "Resultat mod budget",
+         {"hint": "Hvor ligger vi i forhold til budget for måneden og året til dato? Største afvigelser og hvorfor."}),
+        ("question", "Andet jeg bør vide?", {"hint": "Risici, kontrakter eller beslutninger du har brug for."}),
+    ],
+}
+
+import re as _re
+UNKNOWN_RE = _re.compile(r"\b(ved (det |jeg |vi |han |hun )?ikke|ved (jeg|vi) (det )?ikke|aner (det )?ikke|ingen anelse|ikke afklaret|uvist|tbd)\b|^\s*[?\-–]+\s*$", _re.I)
+
+SALES_TYPES = [["direkte", "Direkte salg"], ["udbud", "Udbud"], ["ved_ikke", "Ved ikke"]]
+SALES_PHASES = [["indledende", "Indledende møder"], ["demo", "Demo"], ["afklaring", "Spørgsmål / kravspec / kravbesvarelse"],
+                ["tilbud", "Tilbud"], ["forhandling", "Forhandling"], ["kontrakt", "Kontrakt"],
+                ["vundet", "Vundet"], ["tabt", "Tabt"], ["ikke_i_proces", "Ikke i proces"], ["ved_ikke", "Ved ikke"]]
+# Fase → det grove salgsstadie, som kundematrixen bruger
+PHASE_TO_STAGE = {"indledende": "tidlig_fase", "demo": "aktiv_dialog", "afklaring": "aktiv_dialog",
+                  "tilbud": "fremskreden", "forhandling": "fremskreden", "kontrakt": "fremskreden"}
+MAX_DETAILED_CUSTOMERS = 12
+
+# Svarform: det skal være så let som muligt at svare
+ANSWER_FORMAT_RULES = (
+    "Vælg den svarform, der er hurtigst for lederen, for hvert spørgsmål:\n"
+    "- choice: når svaret er et af få kendte udfald. Giv 2–5 korte options og tag 'Ved ikke' med, når det er relevant. "
+    "Fx 'Er tilbuddet afleveret?' → ['Afleveret', 'Udskudt', 'Tabt', 'Ved ikke'].\n"
+    "- date: når der spørges om hvornår. number: når der spørges om et tal eller beløb.\n"
+    "- text: kun når der skal forklares noget, fx hvad der skal til, eller hvad der er sket.\n"
+    "Brug options = [] for andet end choice. Spørg IKKE om salgsform (direkte salg/udbud) eller fase. "
+    "Kunder har altid faste felter til næste skridt, dato og sandsynlighed, så spørg heller ikke om dem. "
+    "Det afklares i en fælles klik-liste. Max 3 spørgsmål pr. emne, og hellere 2.")
+
+
+def _goal_expected(g):
+    """Forventet fremdrift 0–1 ved lineær plan fra start til deadline (samme logik som i frontend)."""
+    due = str(g.get("due_date") or "")[:10]
+    if not due:
+        return None
+    start = str(g.get("start_date") or g.get("created_at") or date.today().isoformat())[:10]
+    total = (date.fromisoformat(due) - date.fromisoformat(start)).days
+    if total <= 0:
+        return 1.0
+    return max(0.0, min(1.0, (date.today() - date.fromisoformat(start)).days / total))
+
+
 SEED_GOALS = [
     ("salg", "drift", "Sælge 150.000 målepunkter i 2027",
      "Samlet antal solgte målepunkter i kontrakter underskrevet i 2027.",
@@ -443,6 +515,59 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS idx_goal_checkins_goal ON goal_checkins(goal_id)",
             "CREATE INDEX IF NOT EXISTS idx_goal_milestones_goal ON goal_milestones(goal_id)",
             "CREATE INDEX IF NOT EXISTS idx_meeting_actions_area ON meeting_actions(area, status)",
+            # Indrapportering: runder med spørgsmål til CCO/COO/CFO før ledermøder
+            """CREATE TABLE IF NOT EXISTS report_rounds (
+                id SERIAL PRIMARY KEY,
+                area TEXT NOT NULL,
+                meeting_id INTEGER REFERENCES meetings(id) ON DELETE SET NULL,
+                respondent_user_id INTEGER REFERENCES users(id),
+                respondent_name TEXT,
+                token TEXT UNIQUE NOT NULL,
+                status TEXT NOT NULL DEFAULT 'open',
+                due_date DATE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                sent_at TIMESTAMP,
+                submitted_at TIMESTAMP,
+                ai_assessment TEXT,
+                ai_model TEXT,
+                ai_generated_at TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS report_items (
+                id SERIAL PRIMARY KEY,
+                round_id INTEGER NOT NULL REFERENCES report_rounds(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL,
+                ref_type TEXT,
+                ref_id INTEGER,
+                company_id INTEGER REFERENCES companies(id) ON DELETE SET NULL,
+                title TEXT NOT NULL,
+                context JSONB DEFAULT '{}'::jsonb,
+                answer JSONB,
+                answered_at TIMESTAMP,
+                sort_order INTEGER DEFAULT 0
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_report_items_round ON report_items(round_id)",
+            "ALTER TABLE report_rounds ADD COLUMN IF NOT EXISTS practice BOOLEAN DEFAULT FALSE",
+            "ALTER TABLE report_rounds ADD COLUMN IF NOT EXISTS ai_questions BOOLEAN DEFAULT FALSE",
+            # Indkøbsfællesskaber (fx Servia): en virksomhed kan være et fællesskab, kunder kan være medlemmer,
+            # og et tilbud kan gå direkte til kunden eller via fællesskabet
+            "ALTER TABLE companies ADD COLUMN IF NOT EXISTS is_purchasing_group BOOLEAN DEFAULT FALSE",
+            """CREATE TABLE IF NOT EXISTS company_memberships (
+                company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+                group_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (company_id, group_id)
+            )""",
+            "ALTER TABLE tenders ADD COLUMN IF NOT EXISTS purchase_route TEXT DEFAULT 'selv'",
+            # Salgsform og fase efter CEO'ens salgsproces (opdateres fx fra indrapporteringens hurtige lister)
+            "ALTER TABLE companies ADD COLUMN IF NOT EXISTS sales_type TEXT",
+            "ALTER TABLE companies ADD COLUMN IF NOT EXISTS sales_phase TEXT",
+            "ALTER TABLE companies ADD COLUMN IF NOT EXISTS sales_phase_updated DATE",
+            "ALTER TABLE tenders ADD COLUMN IF NOT EXISTS via_group_id INTEGER REFERENCES companies(id) ON DELETE SET NULL",
+            """CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
         ]
         for m in migrations:
             try:
@@ -459,6 +584,11 @@ def init_db():
         cnt = db.execute("SELECT COUNT(*) AS cnt FROM companies").fetchone()["cnt"]
         if cnt == 0:
             _seed_companies(db)
+
+        # Seed: AI-kontekst om salgsprocessen (CEO'en kan rette den under Ledermøder)
+        db.execute("INSERT INTO app_settings (key, value) VALUES ('sales_process', %s) ON CONFLICT (key) DO NOTHING",
+                   (DEFAULT_SALES_PROCESS,))
+        db.commit()
 
         # Seed: CEO-mål fra brugerens egne eksempler, kun første gang
         if db.execute("SELECT COUNT(*) AS cnt FROM goals").fetchone()["cnt"] == 0:
@@ -1079,8 +1209,13 @@ class handler(BaseHTTPRequestHandler):
                     if cid not in tags_map:
                         tags_map[cid] = []
                     tags_map[cid].append({"id": r["id"], "name": r["name"], "color": r["color"]})
+                groups_map = {}
+                for r in db.execute("""SELECT m.company_id, g.id, g.name FROM company_memberships m
+                                       JOIN companies g ON m.group_id = g.id ORDER BY g.name""").fetchall():
+                    groups_map.setdefault(r["company_id"], []).append({"id": r["id"], "name": r["name"]})
                 for row in rows:
                     row["tags"] = tags_map.get(row["id"], [])
+                    row["memberships"] = groups_map.get(row["id"], [])
                 self._json_response(rows)
 
             elif path.startswith("/api/companies/") and path.endswith("/full") and path.count("/") == 4:
@@ -1139,9 +1274,19 @@ class handler(BaseHTTPRequestHandler):
                         (c["id"],)).fetchall()]
                 all_tags = [dict(r) for r in db.execute("SELECT * FROM tags ORDER BY name").fetchall()]
                 tenders = [dict(r) for r in db.execute(
-                    """SELECT t.*, u.name AS responsible_name
+                    """SELECT t.*, u.name AS responsible_name, g.name AS via_group_name
                        FROM tenders t LEFT JOIN users u ON t.responsible_id = u.id
+                       LEFT JOIN companies g ON t.via_group_id = g.id
                        WHERE t.company_id = %s ORDER BY t.created_at DESC""", (cid,)).fetchall()]
+                memberships = [dict(r) for r in db.execute(
+                    """SELECT g.id, g.name FROM company_memberships m JOIN companies g ON m.group_id = g.id
+                       WHERE m.company_id = %s ORDER BY g.name""", (cid,)).fetchall()]
+                members = [dict(r) for r in db.execute(
+                    """SELECT c.id, c.name, c.city,
+                              (SELECT COUNT(*) FROM tenders t WHERE t.company_id = c.id AND t.status NOT IN ('won','lost','dropped')) AS active_tenders,
+                              (SELECT COUNT(*) FROM tenders t WHERE t.company_id = c.id AND t.via_group_id = %s AND t.status NOT IN ('won','lost','dropped')) AS via_group_tenders
+                       FROM company_memberships m JOIN companies c ON m.company_id = c.id
+                       WHERE m.group_id = %s ORDER BY c.name""", (cid, cid)).fetchall()]
                 company_notes = [dict(r) for r in db.execute(
                     "SELECT * FROM company_notes WHERE company_id = %s ORDER BY created_at DESC", (cid,)).fetchall()]
                 self._json_response({
@@ -1150,7 +1295,7 @@ class handler(BaseHTTPRequestHandler):
                     "tasks": tasks, "audit_log": audit,
                     "linkedin_activities": li_activities, "linkedin_engagements": li_engagements,
                     "company_tags": company_tags, "all_tags": all_tags, "tenders": tenders,
-                    "company_notes": company_notes
+                    "company_notes": company_notes, "memberships": memberships, "members": members
                 })
 
             elif path.startswith("/api/companies/") and path.count("/") == 3:
@@ -1517,12 +1662,13 @@ class handler(BaseHTTPRequestHandler):
                     s["previous_score"] = prev_scores.get(s["company_id"])
 
                 active_tenders = [dict(r) for r in db.execute("""
-                    SELECT t.id, t.title, t.status, t.deadline, t.estimated_value,
-                           co.id AS company_id, co.name AS company_name,
+                    SELECT t.id, t.title, t.status, t.deadline, t.estimated_value, t.purchase_route,
+                           co.id AS company_id, co.name AS company_name, g.name AS via_group_name,
                            u.name AS responsible_name,
                            (SELECT COUNT(*) FROM tender_sections ts WHERE ts.tender_id = t.id) AS total_sections,
                            (SELECT COUNT(*) FROM tender_sections ts WHERE ts.tender_id = t.id AND ts.status = 'approved') AS approved_sections
                     FROM tenders t JOIN companies co ON t.company_id = co.id
+                    LEFT JOIN companies g ON t.via_group_id = g.id
                     LEFT JOIN users u ON t.responsible_id = u.id
                     WHERE t.status NOT IN ('won', 'lost', 'dropped')
                     ORDER BY t.deadline ASC NULLS LAST
@@ -1602,10 +1748,11 @@ class handler(BaseHTTPRequestHandler):
                 self._json_response([dict(r) for r in rows])
 
             elif path == "/api/tenders":
-                q = """SELECT t.*, c.name AS company_name,
+                q = """SELECT t.*, c.name AS company_name, g.name AS via_group_name,
                        u1.name AS responsible_name, u2.name AS created_by_name,
                        ct.first_name || ' ' || ct.last_name AS contact_name
                        FROM tenders t JOIN companies c ON t.company_id = c.id
+                       LEFT JOIN companies g ON t.via_group_id = g.id
                        LEFT JOIN users u1 ON t.responsible_id = u1.id
                        LEFT JOIN users u2 ON t.created_by = u2.id
                        LEFT JOIN contacts ct ON t.contact_id = ct.id WHERE 1=1"""
@@ -1629,10 +1776,11 @@ class handler(BaseHTTPRequestHandler):
             elif path.startswith("/api/tenders/") and path.endswith("/full"):
                 tid = int(path.split("/")[-2])
                 tender = db.execute(
-                    """SELECT t.*, c.name AS company_name,
+                    """SELECT t.*, c.name AS company_name, g.name AS via_group_name,
                        u1.name AS responsible_name, u2.name AS created_by_name,
                        ct.first_name || ' ' || ct.last_name AS contact_name
                        FROM tenders t JOIN companies c ON t.company_id = c.id
+                       LEFT JOIN companies g ON t.via_group_id = g.id
                        LEFT JOIN users u1 ON t.responsible_id = u1.id
                        LEFT JOIN users u2 ON t.created_by = u2.id
                        LEFT JOIN contacts ct ON t.contact_id = ct.id
@@ -1923,12 +2071,13 @@ class handler(BaseHTTPRequestHandler):
             elif path == "/api/tenders":
                 cur = db.execute(
                     """INSERT INTO tenders (company_id,template_id,title,description,status,
-                       deadline,contact_id,responsible_id,created_by,estimated_value,portal_link,notes)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                       deadline,contact_id,responsible_id,created_by,estimated_value,portal_link,notes,purchase_route,via_group_id)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
                     (body["company_id"], body.get("template_id"), body["title"], body.get("description"),
                      body.get("status","draft"), body.get("deadline"), body.get("contact_id"),
                      body.get("responsible_id"), uid, body.get("estimated_value"),
-                     body.get("portal_link"), body.get("notes")))
+                     body.get("portal_link"), body.get("notes"), body.get("purchase_route") or "selv",
+                     body.get("via_group_id") if body.get("purchase_route") == "faellesskab" else None))
                 tender_id = cur.fetchone()["id"]
                 template_id = body.get("template_id")
                 if template_id:
@@ -2293,12 +2442,15 @@ class handler(BaseHTTPRequestHandler):
                 for k, v in body.items():
                     if k in e:
                         e[k] = v
+                route = e.get("purchase_route") or "selv"
                 db.execute(
                     """UPDATE tenders SET company_id=%s,title=%s,description=%s,status=%s,
-                       deadline=%s,contact_id=%s,responsible_id=%s,estimated_value=%s,portal_link=%s,notes=%s WHERE id=%s""",
+                       deadline=%s,contact_id=%s,responsible_id=%s,estimated_value=%s,portal_link=%s,notes=%s,
+                       purchase_route=%s,via_group_id=%s WHERE id=%s""",
                     (e["company_id"], e["title"], e.get("description"), e["status"],
                      e.get("deadline"), e.get("contact_id"), e.get("responsible_id"),
-                     e.get("estimated_value"), e.get("portal_link"), e.get("notes"), tid))
+                     e.get("estimated_value"), e.get("portal_link"), e.get("notes"),
+                     route, e.get("via_group_id") if route == "faellesskab" else None, tid))
                 db.commit()
                 log_audit(db, uid, "update", "tender", tid, e["title"], {"status": e["status"]})
                 db.commit()
@@ -2565,6 +2717,10 @@ class handler(BaseHTTPRequestHandler):
 
     def _handle_ceo(self, db, method, path, params, body, uid):
         """Returns True when the request was a SystemateCEO route and has been answered."""
+        if path.startswith("/api/report-rounds") or path.startswith("/api/r/") or path == "/api/report-config":
+            return self._handle_reports(db, method, path, body, uid)
+        if path == "/api/purchasing-groups" or (path.startswith("/api/companies/") and ("/memberships" in path or path.endswith("/group"))):
+            return self._handle_groups(db, method, path, body, uid)
         if not (path.startswith("/api/goals") or path.startswith("/api/meetings") or path.startswith("/api/actions")
                 or path.startswith("/api/milestones") or path == "/api/ceo/overview"):
             return False
@@ -2824,6 +2980,809 @@ class handler(BaseHTTPRequestHandler):
             return True
 
         return False
+
+    # ─── Indkøbsfællesskaber ───
+    def _handle_groups(self, db, method, path, body, uid):
+        parts = path.strip("/").split("/")  # ['api','companies','12','memberships','5']
+        if path == "/api/purchasing-groups" and method == "GET":
+            self._json_response([dict(r) for r in db.execute("""
+                SELECT g.id, g.name, (SELECT COUNT(*) FROM company_memberships m WHERE m.group_id = g.id) AS member_count
+                FROM companies g WHERE g.is_purchasing_group ORDER BY g.name""").fetchall()])
+            return True
+        cid = int(parts[2])
+        if parts[3] == "group" and method == "PUT":
+            db.execute("UPDATE companies SET is_purchasing_group = %s WHERE id = %s", (bool(body.get("is_purchasing_group")), cid))
+            db.commit()
+            self._json_response({"ok": True})
+        elif parts[3] == "memberships" and method == "POST":
+            group_id = int(body["group_id"])
+            if group_id == cid:
+                self._error(400, "En virksomhed kan ikke være medlem af sig selv"); return True
+            db.execute("UPDATE companies SET is_purchasing_group = TRUE WHERE id = %s", (group_id,))
+            db.execute("INSERT INTO company_memberships (company_id, group_id) VALUES (%s,%s) ON CONFLICT DO NOTHING", (cid, group_id))
+            db.commit()
+            log_audit(db, uid, "update", "company", cid, f"medlem af fællesskab {group_id}")
+            db.commit()
+            self._json_response({"ok": True}, 201)
+        elif parts[3] == "memberships" and method == "DELETE" and len(parts) > 4:
+            db.execute("DELETE FROM company_memberships WHERE company_id = %s AND group_id = %s", (cid, int(parts[4])))
+            db.commit()
+            self._no_content()
+        else:
+            self._error(404, "Endpoint not found")
+        return True
+
+    # ─── Indrapportering til ledermøder ───
+    def _customer_priority(self, ctx):
+        """Hvor vigtigt er det at spørge grundigt ind til kunden nu? Beløb, overskredne frister og tidligere problemer."""
+        today = date.today().isoformat()
+        score = 0
+        for t in ctx["tenders"]:
+            score += 3 if t.get("deadline") and str(t["deadline"])[:10] < today else 0
+            score += 2 if t.get("deadline") and str(t["deadline"])[:10] <= (date.today() + timedelta(days=30)).isoformat() else 0
+            v = int(_re.sub(r"\D", "", str(t.get("estimated_value") or "")) or 0)
+            score += 3 if v >= 1_000_000 else 1 if v > 0 else 0
+        score += sum(2 for t in ctx["tasks"] if t.get("due_date") and str(t["due_date"])[:10] < today)
+        prev = ctx.get("previous_answer") or {}
+        score += 2 if prev.get("status") in ("risiko", "kritisk", "udfordret") else 0
+        score += 1 if not ctx.get("last_contact") else 0
+        return score
+
+    def _build_report_items(self, db, round_id, area, respondent_user_id=None):
+        """Laver indrapporteringen ud fra data. Bedste svarform først: hurtige klik-lister til det, alle kunder skal svare på,
+        grundige spørgsmål kun til de vigtigste kunder, og emner der blev udskudt sidst kommer med igen."""
+        items = []
+        # Emner der blev markeret "svarer senere" i forrige runde
+        prev_round = db.execute("""SELECT id FROM report_rounds WHERE area = %s AND respondent_user_id = %s AND status != 'draft'
+                                   AND submitted_at IS NOT NULL AND id != %s ORDER BY submitted_at DESC LIMIT 1""",
+                                (area, respondent_user_id, round_id)).fetchone() if respondent_user_id else None
+        if prev_round:
+            for it in db.execute("SELECT * FROM report_items WHERE round_id = %s ORDER BY sort_order", (prev_round["id"],)).fetchall():
+                if (it["answer"] or {}).get("later"):
+                    ctx = dict(it["context"] or {})
+                    ctx["carried"] = True
+                    items.append((it["kind"], it["ref_type"], it["ref_id"], it["company_id"], it["title"], ctx))
+        carried_companies = {i[3] for i in items if i[3]}
+
+        customers = []
+        if area in ("salg", "leverance"):
+            if area == "salg":
+                companies = db.execute("""
+                    SELECT DISTINCT co.id, co.name, co.sales_stage, co.sales_type, co.sales_phase FROM companies co
+                    WHERE NOT COALESCE(co.is_purchasing_group, FALSE) AND (
+                          co.id IN (SELECT company_id FROM tenders WHERE status NOT IN ('won','lost','dropped'))
+                       OR co.id IN (SELECT company_id FROM tasks WHERE status != 'done' AND COALESCE(area,'salg') = 'salg'))
+                    ORDER BY co.name LIMIT 60""").fetchall()
+            else:
+                companies = db.execute("""
+                    SELECT DISTINCT co.id, co.name, co.sales_stage, co.sales_type, co.sales_phase FROM companies co
+                    WHERE co.id IN (SELECT company_id FROM tasks WHERE status != 'done' AND area = 'leverance')
+                       OR co.id IN (SELECT company_id FROM goals WHERE NOT archived AND area = 'leverance' AND company_id IS NOT NULL)
+                    ORDER BY co.name LIMIT 40""").fetchall()
+            for co in companies:
+                cid = co["id"]
+                tenders = [dict(r) for r in db.execute("""
+                    SELECT t.id, t.title, t.status, t.deadline, t.estimated_value, t.purchase_route, g.name AS via_group
+                    FROM tenders t LEFT JOIN companies g ON t.via_group_id = g.id
+                    WHERE t.company_id = %s AND t.status NOT IN ('won','lost','dropped') ORDER BY t.deadline NULLS LAST""", (cid,)).fetchall()]
+                groups = [r["name"] for r in db.execute(
+                    """SELECT g.name FROM company_memberships m JOIN companies g ON m.group_id = g.id WHERE m.company_id = %s""", (cid,)).fetchall()]
+                tasks = [dict(r) for r in db.execute("""
+                    SELECT id, title, due_date, priority FROM tasks
+                    WHERE company_id = %s AND status != 'done' AND COALESCE(area,'salg') = %s ORDER BY due_date NULLS LAST""",
+                    (cid, area)).fetchall()]
+                last = db.execute("""
+                    SELECT MAX(d) AS d FROM (
+                        SELECT i.date AS d FROM interactions i LEFT JOIN contacts ct ON i.contact_id = ct.id
+                        WHERE COALESCE(i.company_id, ct.company_id) = %s
+                        UNION ALL SELECT created_at::date FROM company_notes
+                        WHERE company_id = %s AND content NOT LIKE 'Indrapporteret%%') x""", (cid, cid)).fetchone()
+                prev = db.execute("""
+                    SELECT ri.answer, rr.submitted_at FROM report_items ri JOIN report_rounds rr ON ri.round_id = rr.id
+                    WHERE ri.company_id = %s AND ri.kind IN ('customer','topic') AND rr.area = %s AND ri.answer IS NOT NULL
+                          AND rr.submitted_at IS NOT NULL
+                    ORDER BY rr.submitted_at DESC NULLS LAST, ri.id DESC LIMIT 1""", (cid, area)).fetchone()
+                ctx = {"tenders": tenders, "tasks": tasks, "sales_stage": co["sales_stage"], "member_of": groups,
+                       "sales_type": co["sales_type"], "sales_phase": co["sales_phase"],
+                       "last_contact": last["d"] if last else None,
+                       "previous_answer": prev["answer"] if prev else None,
+                       "previous_date": prev["submitted_at"] if prev else None}
+                ctx["priority"] = self._customer_priority(ctx)
+                customers.append((co, ctx))
+
+        if area == "salg" and customers:
+            def hint(ctx):
+                parts = []
+                for t in ctx["tenders"][:1]:
+                    parts.append(t["title"] + (f" · deadline {str(t['deadline'])[:10]}" if t.get("deadline") else ""))
+                if not parts and ctx["tasks"]:
+                    parts.append(ctx["tasks"][0]["title"])
+                if ctx["member_of"]:
+                    parts.append("medlem af " + ", ".join(ctx["member_of"]))
+                return " · ".join(parts)
+            rows = lambda lst, field: [{"company_id": co["id"], "name": co["name"], "hint": hint(ctx), "current": ctx.get(field)} for co, ctx in lst]
+            unknown_type = [(co, ctx) for co, ctx in customers if not ctx["sales_type"] or ctx["sales_type"] == "ved_ikke"]
+            if unknown_type:
+                items.append(("matrix", None, None, None, "Direkte salg eller udbud?",
+                              {"target": "sales_type", "input": "choice", "options": SALES_TYPES,
+                               "hint": "Ét klik pr. kunde. Svaret gemmes på kunden, så du ikke bliver spurgt igen.",
+                               "rows": rows(unknown_type, "sales_type")}))
+            items.append(("matrix", None, None, None, "Hvor i forløbet er kunderne nu?",
+                          {"target": "sales_phase", "input": "select", "options": SALES_PHASES,
+                           "hint": "Vælg fasen for hver kunde. Står den rigtigt fra sidst, så tryk ”Alle uændrede”.",
+                           "rows": rows(customers, "sales_phase")}))
+            ranked = sorted(customers, key=lambda x: -x[1]["priority"])
+            detailed = [c for c in ranked[:MAX_DETAILED_CUSTOMERS] if c[0]["id"] not in carried_companies]
+            rest = [c for c in ranked[MAX_DETAILED_CUSTOMERS:] if c[0]["id"] not in carried_companies]
+            if rest:
+                items.append(("matrix", None, None, None, "Noget nyt hos disse kunder?",
+                              {"target": "news", "input": "choice", "options": [["nej", "Nej"], ["ja", "Ja"]],
+                               "hint": "De mindre presserende kunder. Svar ”Ja” for at skrive kort, hvad der er sket.",
+                               "rows": rows(rest, "news")}))
+            for co, ctx in sorted(detailed, key=lambda x: x[0]["name"]):
+                items.append(("customer", "company", co["id"], co["id"], co["name"], ctx))
+        else:
+            for co, ctx in customers:
+                if co["id"] not in carried_companies:
+                    items.append(("customer", "company", co["id"], co["id"], co["name"], ctx))
+        for g in self._goal_rows(db, "AND NOT g.archived AND g.area = %s", (area,)):
+            ctx = {k: g.get(k) for k in ("kind", "unit", "start_value", "target_value", "current_value", "due_date",
+                                          "status", "last_checkin", "last_comment", "milestones_total", "milestones_done", "start_date")}
+            items.append(("goal", "goal", g["id"], g.get("company_id"), g["title"], ctx))
+        for kind, title, ctx in REPORT_QUESTIONS.get(area, []):
+            items.append((kind, None, None, None, title, ctx))
+        for i, (kind, ref_type, ref_id, company_id, title, ctx) in enumerate(items):
+            db.execute("""INSERT INTO report_items (round_id, kind, ref_type, ref_id, company_id, title, context, sort_order)
+                          VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+                       (round_id, kind, ref_type, ref_id, company_id, title, json.dumps(ctx, default=_json_default), i))
+
+    @staticmethod
+    def _answer_texts(a):
+        texts = [v for k, v in a.items() if isinstance(v, str) and k not in ("status", "goal_status", "probability", "next_date")]
+        fu = a.get("followup") or {}
+        if fu.get("answer"):
+            texts.append(fu["answer"])
+        return texts
+
+    def _report_flags(self, item):
+        """Regelbaserede advarsler, så CEO'en ser uoverensstemmelser også uden AI-vurdering."""
+        import re
+        flags = []
+        a = item.get("answer") or {}
+        ctx = item.get("context") or {}
+        today = date.today().isoformat()
+        if not a:
+            return ["Ikke besvaret"]
+        if a.get("later"):
+            return ["Svarer senere. Kommer med i næste indrapportering."]
+        if item["kind"] == "matrix":
+            rows = ctx.get("rows") or []
+            vals = a.get("rows") or {}
+            missing = [r["name"] for r in rows if not vals.get(str(r["company_id"]))]
+            if missing:
+                flags.append(f"{len(missing)} af {len(rows)} kunder ikke besvaret")
+            unk = [r["name"] for r in rows if vals.get(str(r["company_id"])) == "ved_ikke"]
+            if unk:
+                flags.append("'Ved ikke' for: " + ", ".join(unk[:6]) + (" …" if len(unk) > 6 else ""))
+            if ctx.get("target") == "sales_phase":
+                for key, label in (("tabt", "tabt"), ("vundet", "vundet"), ("ikke_i_proces", "ikke i proces")):
+                    names = [r["name"] for r in rows if vals.get(str(r["company_id"])) == key]
+                    if names:
+                        flags.append(f"Meldt {label}: " + ", ".join(names) + ". Se forslag til oprydning.")
+            if ctx.get("target") == "news":
+                yes = [r["name"] for r in rows if vals.get(str(r["company_id"])) == "ja" and not (a.get("notes") or {}).get(str(r["company_id"]))]
+                if yes:
+                    flags.append("Svarer 'ja' uden at skrive hvad: " + ", ".join(yes))
+            return flags
+        texts = self._answer_texts(a)
+        unknown = [t for t in texts if UNKNOWN_RE.search(t)]
+        if unknown:
+            flags.append(f"Svarer 'ved ikke' {len(unknown)} gang" + ("e" if len(unknown) > 1 else ""))
+        positive = a.get("status") in ("paa_sporet", "som_planlagt", "on_track") or a.get("goal_status") == "on_track"
+        if positive and unknown:
+            flags.append("Modstrid: vurderet som på sporet, men svarer 'ved ikke' på centrale spørgsmål")
+        for t in texts:
+            for m in re.finditer(r"\b(\d{1,2})[/.-](\d{1,2})[/.-](20\d{2})\b|\b(20\d{2})-(\d{2})-(\d{2})\b", t):
+                try:
+                    d = date(int(m.group(3)), int(m.group(2)), int(m.group(1))) if m.group(3) else date(int(m.group(4)), int(m.group(5)), int(m.group(6)))
+                except ValueError:
+                    continue
+                if (d - date.today()).days > 270:
+                    flags.append(f"Nævner datoen {m.group(0)}, mere end 9 måneder ude. Tjek at den er rigtig.")
+        fu = a.get("followup") or {}
+        if fu.get("question") and not fu.get("answer"):
+            flags.append("Opfølgende spørgsmål ikke besvaret" + (" (sprunget over)" if fu.get("skipped") else ""))
+        if item["kind"] == "customer":
+            if a.get("not_relevant"):
+                return ["Markeret som ikke længere i proces. Overvej at lukke tilbud og sager."]
+            prob = int(a.get("probability") or 0)
+            last = str(ctx.get("last_contact") or "")[:10]
+            days = (date.today() - date.fromisoformat(last)).days if last else None
+            if a.get("status") in ("udfordret", "forsinket"):
+                flags.append("Rapporteret som " + a["status"])
+            if prob >= 75 and (days is None or days > 30):
+                flags.append(f"Høj sandsynlighed ({prob}%), men ingen registreret kontakt " + ("nogensinde" if days is None else f"i {days} dage"))
+            if not a.get("next_step"):
+                flags.append("Intet næste skridt angivet")
+            elif not a.get("next_date"):
+                flags.append("Næste skridt uden dato")
+            elif a.get("next_date") < today:
+                flags.append("Datoen for næste skridt er allerede passeret")
+            for t in ctx.get("tenders") or []:
+                if t.get("deadline") and str(t["deadline"])[:10] < today and a.get("status") not in ("vundet", "tabt"):  # tilbud findes kun i salg
+                    flags.append(f"Tilbuddet ”{t['title']}” er over deadline")
+            prev = ctx.get("previous_answer") or {}
+            if prev and prev.get("next_step") and prev.get("next_step") == a.get("next_step"):
+                flags.append("Samme næste skridt som sidst. Står det stille?")
+        elif item["kind"] == "marketing":
+            if a.get("activities") and int(a.get("leads") or 0) == 0:
+                flags.append("Aktiviteter, men ingen nye leads")
+            if not a.get("next"):
+                flags.append("Ingen plan for de næste 14 dage")
+        elif item["kind"] == "topic":
+            qs = (ctx.get("questions") or [])
+            missing = [i for i in range(len(qs)) if not (a.get(f"q{i}") or "").strip()]
+            if missing:
+                flags.append(f"{len(missing)} af {len(qs)} spørgsmål ikke besvaret")
+            if a.get("status") in ("risiko", "kritisk"):
+                flags.append("Vurderet som " + a["status"])
+            is_text = lambda q: not isinstance(q, dict) or q.get("answer_type", "text") == "text"
+            short = [i for i in range(len(qs)) if is_text(qs[i]) and 0 < len((a.get(f"q{i}") or "").strip()) < 25 and not UNKNOWN_RE.search(a.get(f"q{i}") or "")]
+            if short:
+                flags.append("Meget korte svar på spørgsmål " + ", ".join(chr(97 + i) for i in short) + ". Spørg ind til dem på mødet.")
+            src = ctx.get("source") or {}
+            if ctx.get("source_kind") == "customer":
+                prob = int(a.get("probability") or 0)
+                last = str(src.get("last_contact") or "")[:10]
+                days = (date.today() - date.fromisoformat(last)).days if last else None
+                if prob >= 75 and (days is None or days > 30):
+                    flags.append(f"Høj sandsynlighed ({prob}%), men ingen registreret kontakt " + ("nogensinde" if days is None else f"i {days} dage"))
+                if prob >= 75 and a.get("status") == "kritisk":
+                    flags.append("Modstrid: høj sandsynlighed, men vurderet som kritisk")
+                if a.get("next_step") and not a.get("next_date"):
+                    flags.append("Næste skridt uden dato")
+                elif a.get("next_date") and a["next_date"] < today:
+                    flags.append("Datoen for næste skridt er allerede passeret")
+            if ctx.get("source_kind") == "goal" and a.get("goal_status") == "on_track" and src.get("target_value") is not None:
+                exp = _goal_expected(src)
+                start, target = float(src.get("start_value") or 0), float(src["target_value"])
+                cur = float(a.get("value") or src.get("current_value") or start)
+                prog = (cur - start) / (target - start) if target != start else 1
+                if exp is not None and prog < exp - 0.2:
+                    flags.append(f"Modstrid: 'På sporet', men fremdriften er {round(prog * 100)}% mod forventet {round(exp * 100)}%")
+        elif item["kind"] == "goal":
+            if a.get("status") in ("at_risk", "off_track"):
+                flags.append("Målet er " + ("bagud" if a["status"] == "off_track" else "i risiko"))
+            if ctx.get("current_value") is not None and a.get("value") not in (None, "") and \
+                    float(a["value"]) == float(ctx["current_value"]) and ctx.get("last_checkin"):
+                flags.append("Uændret værdi siden sidste opdatering")
+        return flags
+
+    def _round_full(self, db, rid, include_token=True):
+        row = db.execute("""SELECT rr.*, u.email AS respondent_email, m.title AS meeting_title, m.meeting_date
+                            FROM report_rounds rr LEFT JOIN users u ON rr.respondent_user_id = u.id
+                            LEFT JOIN meetings m ON rr.meeting_id = m.id WHERE rr.id = %s""", (rid,)).fetchone()
+        if not row:
+            return None
+        rnd = dict(row)
+        if not include_token:
+            rnd.pop("token", None)
+        rnd["items"] = [dict(r) for r in db.execute(
+            "SELECT * FROM report_items WHERE round_id = %s ORDER BY sort_order, id", (rid,)).fetchall()]
+        for it in rnd["items"]:
+            it["flags"] = self._report_flags(it)
+        return rnd
+
+    OUTCOME_RE = _re.compile(r"\b(tabt|vundet|afleveret|indsendt)\b", _re.I)
+
+    def _cleanup_suggestions(self, db, rnd):
+        """Forslag til oprydning ud fra svarene: tabt/vundet/ikke i proces/afleveret → konkrete ændringer på tilbud og sager."""
+        outcomes = {}  # company_id -> (outcome, kilde)
+        for it in rnd["items"]:
+            a = it.get("answer") or {}
+            if a.get("later"):
+                continue
+            if it["kind"] == "matrix" and (it.get("context") or {}).get("target") == "sales_phase":
+                for cid, val in (a.get("rows") or {}).items():
+                    if val in ("tabt", "vundet", "ikke_i_proces"):
+                        outcomes[int(cid)] = (val, f"Fase: {dict(SALES_PHASES).get(val)}")
+            elif it.get("company_id") and it["kind"] in ("topic", "customer"):
+                for k, v in a.items():
+                    if k.startswith("q") and isinstance(v, str):
+                        m = self.OUTCOME_RE.search(v)
+                        if m and it["company_id"] not in outcomes:
+                            word = m.group(1).lower()
+                            outcomes[it["company_id"]] = ({"indsendt": "afleveret"}.get(word, word), f"Svar: \u201d{v[:80]}\u201d")
+        suggestions = []
+        for cid, (outcome, source) in outcomes.items():
+            co = db.execute("SELECT name FROM companies WHERE id = %s", (cid,)).fetchone()
+            if not co:
+                continue
+            tenders = [dict(r) for r in db.execute("SELECT id, title, status FROM tenders WHERE company_id = %s AND status NOT IN ('won','lost','dropped')", (cid,)).fetchall()]
+            tasks = [dict(r) for r in db.execute("SELECT id, title FROM tasks WHERE company_id = %s AND status != 'done' AND COALESCE(area,'salg') = 'salg'", (cid,)).fetchall()]
+            actions = []
+            if outcome == "tabt":
+                actions += [{"type": "tender_status", "id": t["id"], "status": "lost", "label": f"Sæt tilbuddet \u201d{t['title']}\u201d til Tabt"} for t in tenders]
+                actions += [{"type": "close_task", "id": t["id"], "label": f"Luk sagen \u201d{t['title']}\u201d"} for t in tasks]
+            elif outcome == "vundet":
+                actions += [{"type": "tender_status", "id": t["id"], "status": "won", "label": f"Sæt tilbuddet \u201d{t['title']}\u201d til Vundet"} for t in tenders]
+            elif outcome == "ikke_i_proces":
+                actions += [{"type": "tender_status", "id": t["id"], "status": "dropped", "label": f"Sæt tilbuddet \u201d{t['title']}\u201d til Droppet"} for t in tenders]
+                actions += [{"type": "close_task", "id": t["id"], "label": f"Luk sagen \u201d{t['title']}\u201d"} for t in tasks]
+            elif outcome == "afleveret":
+                actions += [{"type": "tender_status", "id": t["id"], "status": "submitted", "label": f"Sæt tilbuddet \u201d{t['title']}\u201d til Indsendt"}
+                            for t in tenders if t["status"] in ("draft", "in_progress")]
+            if actions:
+                suggestions.append({"id": f"{cid}:{outcome}", "company_id": cid, "company_name": co["name"],
+                                    "outcome": outcome, "source": source, "actions": actions})
+        return suggestions
+
+    def _apply_report(self, db, rnd):
+        """Overfører indsendte svar: målstatus til målets historik og kundestatus som note på virksomheden."""
+        who = rnd.get("respondent_name") or "ukendt"
+        for it in rnd["items"]:
+            a = it.get("answer") or {}
+            if not a or a.get("later"):
+                continue
+            if it["kind"] == "matrix":
+                ctx = it.get("context") or {}
+                for cid, val in (a.get("rows") or {}).items():
+                    if not val:
+                        continue
+                    if ctx.get("target") == "sales_type" and val != "ved_ikke":
+                        db.execute("UPDATE companies SET sales_type = %s WHERE id = %s", (val, int(cid)))
+                    elif ctx.get("target") == "sales_phase" and val != "ved_ikke":
+                        db.execute("""UPDATE companies SET sales_phase = %s, sales_phase_updated = CURRENT_DATE,
+                                      sales_stage = COALESCE(%s, sales_stage) WHERE id = %s""", (val, PHASE_TO_STAGE.get(val), int(cid)))
+                    elif ctx.get("target") == "news" and val == "ja" and (a.get("notes") or {}).get(cid):
+                        db.execute("INSERT INTO company_notes (company_id, user_name, content) VALUES (%s,%s,%s)",
+                                   (int(cid), who, "Indrapporteret: " + a["notes"][cid]))
+                continue
+            if it["kind"] == "goal" and it.get("ref_id") and a.get("status"):
+                value = a.get("value")
+                value = None if value in (None, "") else float(value)
+                comment = a.get("comment") or ""
+                db.execute("""INSERT INTO goal_checkins (goal_id, meeting_id, value, status, comment, user_name)
+                              VALUES (%s,%s,%s,%s,%s,%s)""",
+                           (it["ref_id"], rnd.get("meeting_id"), value, a["status"], f"Indrapporteret: {comment}" if comment else "Indrapporteret", who))
+                db.execute("""UPDATE goals SET status = %s, current_value = COALESCE(%s, current_value),
+                              last_checkin = CURRENT_DATE, updated_at = CURRENT_TIMESTAMP WHERE id = %s""",
+                           (a["status"], value, it["ref_id"]))
+            elif it["kind"] == "topic":
+                ctx = it.get("context") or {}
+                qa = "\n".join(f"{q.get('text') if isinstance(q, dict) else q}\n→ {a.get(f'q{i}') or '(ikke besvaret)'}" for i, q in enumerate(ctx.get("questions") or []))
+                fu = a.get("followup") or {}
+                if fu.get("question"):
+                    qa += f"\n{fu['question']}\n→ {fu.get('answer') or '(ikke besvaret)'}"
+                if ctx.get("source_kind") == "goal" and it.get("ref_id"):
+                    status = a.get("goal_status") or {"paa_sporet": "on_track", "risiko": "at_risk", "kritisk": "off_track"}.get(a.get("status"))
+                    if status:
+                        value = a.get("value")
+                        value = None if value in (None, "") else float(value)
+                        db.execute("""INSERT INTO goal_checkins (goal_id, meeting_id, value, status, comment, user_name)
+                                      VALUES (%s,%s,%s,%s,%s,%s)""",
+                                   (it["ref_id"], rnd.get("meeting_id"), value, status, "Indrapporteret:\n" + qa, who))
+                        db.execute("""UPDATE goals SET status = %s, current_value = COALESCE(%s, current_value),
+                                      last_checkin = CURRENT_DATE, updated_at = CURRENT_TIMESTAMP WHERE id = %s""",
+                                   (status, value, it["ref_id"]))
+                elif it.get("company_id"):
+                    extra = []
+                    if a.get("next_step"): extra.append(f"Næste skridt: {a['next_step']}" + (f" ({a['next_date']})" if a.get("next_date") else ""))
+                    if a.get("probability"): extra.append(f"Sandsynlighed: {a['probability']}%")
+                    db.execute("INSERT INTO company_notes (company_id, user_name, content) VALUES (%s,%s,%s)",
+                               (it["company_id"], who, f"Indrapporteret ({it['title']}):\n" + qa + ("\n" + "\n".join(extra) if extra else "")))
+            elif it["kind"] == "customer" and it.get("company_id"):
+                labels = {"som_planlagt": "Fremdrift som planlagt", "venter": "Venter på kunden", "udfordret": "Udfordret",
+                          "vundet": "Vundet", "tabt": "Tabt / droppet", "forsinket": "Forsinket", "leveret": "Leveret"}
+                if a.get("not_relevant"):
+                    text = "Indrapporteret: ikke længere i proces."
+                else:
+                    parts = [f"Status: {labels.get(a.get('status'), a.get('status') or '-')}"]
+                    if a.get("since_last"): parts.append(f"Siden sidst: {a['since_last']}")
+                    if a.get("next_step"): parts.append(f"Næste skridt: {a['next_step']}" + (f" ({a['next_date']})" if a.get("next_date") else ""))
+                    if a.get("probability"): parts.append(f"Sandsynlighed: {a['probability']}%")
+                    if a.get("help"): parts.append(f"Brug for hjælp: {a['help']}")
+                    text = "Indrapporteret: " + "\n".join(parts)
+                db.execute("INSERT INTO company_notes (company_id, user_name, content) VALUES (%s,%s,%s)",
+                           (it["company_id"], who, text))
+
+    def _setting(self, db, key, default=""):
+        row = db.execute("SELECT value FROM app_settings WHERE key = %s", (key,)).fetchone()
+        return (row["value"] if row else None) or default
+
+    def _claude(self, system, user, schema=None, effort="medium", max_tokens=8000):
+        """Ét kald til Claude. Med schema returneres valideret JSON (structured outputs), ellers tekst."""
+        import anthropic
+        client = anthropic.Anthropic()
+        output_config = {"effort": effort}
+        if schema:
+            output_config["format"] = {"type": "json_schema", "schema": schema}
+        response = client.beta.messages.create(
+            model="claude-opus-5-5",
+            max_tokens=max_tokens,
+            output_config=output_config,
+            betas=["server-side-fallback-2026-07-01"],
+            fallbacks="default",
+            system=system,
+            messages=[{"role": "user", "content": user}],
+        )
+        if response.stop_reason == "refusal":
+            raise RuntimeError("Modellen afviste opgaven.")
+        if response.stop_reason == "max_tokens":
+            raise RuntimeError("Svaret blev for langt. Prøv med færre emner ad gangen.")
+        text = "\n".join(b.text for b in response.content if b.type == "text").strip()
+        return (json.loads(text) if schema else text), response.model
+
+    def _ai_preamble(self, db, area):
+        role = {"salg": "CCO (salg & marketing)", "leverance": "COO (leverance)", "oekonomi": "CFO (økonomi)"}.get(area, area)
+        return (f"Du hjælper CEO'en i Systemate med at følge op på {role}. Skriv på dansk, direkte og konkret, "
+                f"som en erfaren CEO der kender forretningen. I dag er {date.today().isoformat()}.\n\n"
+                f"CEO'ens beskrivelse af salgsprocessen og hvad CEO'en altid vil vide:\n{self._setting(db, 'sales_process', DEFAULT_SALES_PROCESS)}\n\n"
+                f"Andet CEO'en lægger vægt på:\n{self._setting(db, 'ceo_focus', '(intet angivet)')}\n")
+
+    def _generate_topics(self, db, rnd, items):
+        """Omskriver skabelon-emner (kunde, mål, faste spørgsmål) til skarpe spørgsmål ud fra data."""
+        subjects = [{"index": i, "type": it["kind"], "titel": it["title"], "data": it.get("context")} for i, it in enumerate(items)]
+        system = self._ai_preamble(db, rnd["area"]) + (
+            "\nOpgave: Lav spørgsmålene til en indrapportering, som lederen besvarer skriftligt før mødet. For hvert emne:\n"
+            "- Placér kunden i salgsforløbet (direkte salg eller udbud, og fase), hvis det kan udledes. Gæt ikke, spørg hellere.\n"
+            "- Er kunden medlem af et indkøbsfællesskab (member_of, fx Servia), så afklar om de køber selv eller via fællesskabet, "
+            "og hvad det betyder for beslutning, tidsplan og hvem vi skal påvirke. purchase_route på tilbud viser, hvad vi ved i dag.\n"
+            "- Brug de konkrete fakta: deadlines der er overskredet, sager over frist, manglende kontakt, beløb, svar fra sidst.\n"
+            "- Stil 2–3 spørgsmål der kun kan besvares med konkret viden: næste skridt og dato, beslutningstager, konkurrent, "
+            "risiko, hvad der skal til. Undgå ja/nej-spørgsmål og generiske 'hvordan går det'.\n"
+            "- facts: 1–3 korte linjer med de fakta fra data, som lederen skal se ved spørgsmålene.\n"
+            "- why: én sætning om hvorfor emnet er vigtigt nu (eller tom streng).\n"
+            "- ask_status: true hvis en samlet vurdering (på sporet / risiko / kritisk) giver mening.\n"
+            "- title: kort, fx 'EWII · Flow til EWII (3 mio. kr.)'.\n"
+            "Lav præcis ét emne pr. input-emne med samme subject_index.\n\n"
+            + ANSWER_FORMAT_RULES)
+        schema = {"type": "object", "additionalProperties": False, "required": ["topics"], "properties": {"topics": {
+            "type": "array", "items": {"type": "object", "additionalProperties": False,
+                "required": ["subject_index", "title", "facts", "why", "ask_status", "questions"],
+                "properties": {"subject_index": {"type": "integer"}, "title": {"type": "string"},
+                               "facts": {"type": "array", "items": {"type": "string"}}, "why": {"type": "string"},
+                               "ask_status": {"type": "boolean"}, "questions": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+                        "required": ["text", "answer_type", "options"],
+                        "properties": {"text": {"type": "string"},
+                                       "answer_type": {"type": "string", "enum": ["text", "choice", "date", "number"]},
+                                       "options": {"type": "array", "items": {"type": "string"}}}}}}}}}}
+        data, model = self._claude(system, "Emner (JSON):\n" + json.dumps(subjects, ensure_ascii=False, default=_json_default), schema)
+        return data["topics"], model
+
+    def _generate_patterns(self, db, rnd, items):
+        """Finder mønstre på tværs af emner (dubletter, klynger, partnere) og laver 0–3 ekstra emner."""
+        overview = [{"index": i, "type": (it.get("context") or {}).get("source_kind", it["kind"]), "titel": it["title"],
+                     "fakta": (it.get("context") or {}).get("facts") or [],
+                     "data": (it.get("context") or {}).get("source") or it.get("context")} for i, it in enumerate(items) if it["kind"] != "matrix"]
+        system = self._ai_preamble(db, rnd["area"]) + (
+            "\nOpgave: Se på alle emner samlet og find mønstre, som enkelte emner ikke viser: dubletter (fx flere ens tilbud), "
+            "klynger (fx mange møder via samme partner med samme frist), mange sager over frist hos én person, "
+            "eller sammenhæng til målene (fx hvor meget pipelinen dækker af salgsmålet). Lav 0–3 ekstra emner med 2–3 spørgsmål hver. "
+            "Lav kun et emne, hvis mønsteret er tydeligt i data. related_subject_indexes angiver de emner mønsteret bygger på.\n\n"
+            + ANSWER_FORMAT_RULES)
+        schema = {"type": "object", "additionalProperties": False, "required": ["topics"], "properties": {"topics": {
+            "type": "array", "items": {"type": "object", "additionalProperties": False,
+                "required": ["title", "facts", "why", "ask_status", "questions", "related_subject_indexes"],
+                "properties": {"title": {"type": "string"}, "facts": {"type": "array", "items": {"type": "string"}},
+                               "why": {"type": "string"}, "ask_status": {"type": "boolean"},
+                               "questions": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+                        "required": ["text", "answer_type", "options"],
+                        "properties": {"text": {"type": "string"},
+                                       "answer_type": {"type": "string", "enum": ["text", "choice", "date", "number"]},
+                                       "options": {"type": "array", "items": {"type": "string"}}}}},
+                               "related_subject_indexes": {"type": "array", "items": {"type": "integer"}}}}}}}
+        data, model = self._claude(system, "Alle emner (JSON):\n" + json.dumps(overview, ensure_ascii=False, default=_json_default), schema)
+        return data["topics"][:3], model
+
+    def _followup_question(self, db, rnd, item):
+        """Vurderer ét besvaret emne og returnerer evt. ét opfølgende spørgsmål (ved ikke, vagt, modstrid, mangler tal/dato)."""
+        ctx = item.get("context") or {}
+        a = item.get("answer") or {}
+        if a.get("later") or item["kind"] == "matrix":
+            return None
+        qtext = lambda q: q.get("text") if isinstance(q, dict) else q
+        qa = [{"spørgsmål": qtext(q), "svarform": (q.get("answer_type") if isinstance(q, dict) else "text"), "svar": a.get(f"q{i}")}
+              for i, q in enumerate(ctx.get("questions") or [])]
+        if not qa:
+            qa = [{"felt": k, "svar": v} for k, v in a.items() if k not in ("followup", "checked")]
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            system = self._ai_preamble(db, rnd["area"]) + (
+                "\nOpgave: Lederen har netop besvaret ét emne. Afgør om ét opfølgende spørgsmål er nødvendigt, før CEO'en kan bruge svaret. "
+                "Stil et opfølgende spørgsmål hvis: der svares 'ved ikke' (spørg hvem der ved det og hvornår), svaret er vagt eller generelt, "
+                "den samlede vurdering strider mod svarene eller mod fakta (fx 'på sporet' men ingen kender risici, høj sandsynlighed uden kontakt), "
+                "en dato eller et tal virker forkert eller mangler. Ét kort, venligt og konkret spørgsmål, der henviser til det lederen skrev. "
+                "Hvis svaret er godt nok: needs_followup=false og tomme strenge.")
+            schema = {"type": "object", "additionalProperties": False, "required": ["needs_followup", "kind", "question", "note_for_ceo"],
+                      "properties": {"needs_followup": {"type": "boolean"},
+                                     "kind": {"type": "string", "enum": ["ved_ikke", "vagt", "modstrid", "mangler_tal_eller_dato", "ok"]},
+                                     "question": {"type": "string"}, "note_for_ceo": {"type": "string"}}}
+            user = json.dumps({"emne": item["title"], "fakta": ctx.get("facts"), "data": ctx.get("source"),
+                               "samlet_vurdering": a.get("status") or a.get("goal_status"), "svar": qa,
+                               "næste_skridt": a.get("next_step"), "dato": a.get("next_date"), "sandsynlighed": a.get("probability")},
+                              ensure_ascii=False, default=_json_default)
+            data, _ = self._claude(system, user, schema, effort="low", max_tokens=2000)
+            return data if data.get("needs_followup") else None
+        # Uden AI: fang i det mindste 'ved ikke'
+        for x in qa:
+            if isinstance(x.get("svar"), str) and UNKNOWN_RE.search(x["svar"]):
+                q = x.get("spørgsmål") or x.get("felt")
+                return {"needs_followup": True, "kind": "ved_ikke",
+                        "question": f"Du svarer 'ved ikke' til: ”{q}”. Hvem ved det, og hvornår kan du give et svar?", "note_for_ceo": ""}
+        return None
+
+    def _assess_report(self, db, rnd):
+        """AI-vurdering til CEO'en via Claude. Returnerer (tekst, model)."""
+        payload = [{"type": (it.get("context") or {}).get("source_kind", it["kind"]), "titel": it["title"],
+                    "fakta_og_data": it.get("context"), "svar": it.get("answer"), "automatiske_advarsler": it.get("flags")}
+                   for it in rnd["items"]]
+        system = self._ai_preamble(db, rnd["area"]) + (
+            "\nOpgave: Vurdér lederens indrapportering holdt op mod data, så CEO'en er klar til mødet. "
+            "Vurdér forretningen, ikke personen. Nævn kunder og mål ved navn. Gæt ikke på fakta, der ikke står i materialet.\n"
+            "Vær særligt opmærksom på: svar med 'ved ikke' (hvad betyder det for styringen), modstrid mellem samlet vurdering og svarene "
+            "(fx 'på sporet' men ukendte risici), datoer eller tal der virker forkerte, opfølgende spørgsmål der ikke er besvaret, "
+            "og mål hvor fremdriften ikke passer med vurderingen.\n\n"
+            "Format (kort, max ca. 400 ord):\n## Samlet billede\n2–4 sætninger.\n## Kræver opmærksomhed\nPunktliste, vigtigste først.\n"
+            "## Går godt\nPunktliste (kort).\n## Spørgsmål til mødet\n3–5 konkrete spørgsmål.\n## Forslag til aktioner\n2–5 aktioner med ansvarlig (rolle) og frist.")
+        user = (f"Indrapporteret af: {rnd.get('respondent_name')}\n\nMateriale (JSON):\n"
+                + json.dumps(payload, ensure_ascii=False, default=_json_default))
+        return self._claude(system, user, effort="medium", max_tokens=6000)
+
+    def _slack_dm(self, email, text):
+        """Sender en direkte besked i Slack via bot-token. Kræver scopes chat:write og users:read.email."""
+        import urllib.request, urllib.parse
+        token = os.environ.get("SLACK_BOT_TOKEN")
+        def call(method, data):
+            req = urllib.request.Request(f"https://slack.com/api/{method}", data=json.dumps(data).encode(),
+                                         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=utf-8"})
+            return json.loads(urllib.request.urlopen(req, timeout=10).read())
+        req = urllib.request.Request("https://slack.com/api/users.lookupByEmail?" + urllib.parse.urlencode({"email": email}),
+                                     headers={"Authorization": f"Bearer {token}"})
+        user = json.loads(urllib.request.urlopen(req, timeout=10).read())
+        if not user.get("ok"):
+            raise RuntimeError(f"Slack kunne ikke finde {email}: {user.get('error')}")
+        res = call("chat.postMessage", {"channel": user["user"]["id"], "text": text})
+        if not res.get("ok"):
+            raise RuntimeError(f"Slack-fejl: {res.get('error')}")
+
+    def _handle_reports(self, db, method, path, body, uid):
+        parts = path.strip("/").split("/")
+
+        if path == "/api/report-config":
+            if method == "PUT":
+                for key in ("sales_process", "ceo_focus"):
+                    if key in body:
+                        db.execute("""INSERT INTO app_settings (key, value, updated_at) VALUES (%s,%s,CURRENT_TIMESTAMP)
+                                      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP""",
+                                   (key, body[key]))
+                db.commit()
+            self._json_response({"ai": bool(os.environ.get("ANTHROPIC_API_KEY")), "slack": bool(os.environ.get("SLACK_BOT_TOKEN")),
+                                 "sales_process": self._setting(db, "sales_process", DEFAULT_SALES_PROCESS),
+                                 "ceo_focus": self._setting(db, "ceo_focus", "")})
+            return True
+
+        # ── Modtagerens side: kun adgang via det personlige link ──
+        if parts[1] == "r":
+            token = parts[2] if len(parts) > 2 else ""
+            row = db.execute("SELECT id, status FROM report_rounds WHERE token = %s", (token,)).fetchone()
+            if not row or len(token) < 20:
+                self._error(404, "Linket er ikke gyldigt"); return True
+            rid = row["id"]
+            if method == "GET" and len(parts) == 3:
+                rnd = self._round_full(db, rid, include_token=False)
+                if rnd["status"] == "draft":
+                    rnd["items"] = []
+                for it in rnd["items"]:
+                    it.pop("flags", None)
+                rnd.pop("ai_assessment", None)
+                rnd.pop("respondent_email", None)
+                self._json_response(rnd)
+            elif method == "PUT" and len(parts) == 5 and parts[3] == "items":
+                if row["status"] != "open":
+                    self._error(409, "Indrapporteringen er allerede indsendt"); return True
+                db.execute("UPDATE report_items SET answer = %s, answered_at = CURRENT_TIMESTAMP WHERE id = %s AND round_id = %s",
+                           (json.dumps(body.get("answer") or {}), int(parts[4]), rid))
+                db.commit()
+                self._json_response({"ok": True})
+            elif method == "POST" and len(parts) == 6 and parts[3] == "items" and parts[5] == "followup":
+                if row["status"] != "open":
+                    self._error(409, "Indrapporteringen er ikke åben"); return True
+                rnd = self._round_full(db, rid)
+                item = next((i for i in rnd["items"] if i["id"] == int(parts[4])), None)
+                if not item or not item.get("answer"):
+                    self._json_response({"followup": None}); return True
+                a = dict(item["answer"])
+                if (a.get("followup") or {}).get("question") or a.get("checked"):
+                    self._json_response({"followup": a.get("followup")}); return True
+                try:
+                    fu = self._followup_question(db, rnd, item)
+                except Exception as e:
+                    print(f"followup failed: {e}")
+                    fu = None
+                a["checked"] = True
+                if fu:
+                    a["followup"] = {"question": fu["question"], "kind": fu.get("kind"), "note_for_ceo": fu.get("note_for_ceo", ""), "answer": ""}
+                db.execute("UPDATE report_items SET answer = %s WHERE id = %s", (json.dumps(a), item["id"]))
+                db.commit()
+                self._json_response({"followup": a.get("followup")})
+            elif method == "POST" and len(parts) == 4 and parts[3] == "submit":
+                if row["status"] != "open":
+                    self._error(409, "Indrapporteringen er allerede indsendt"); return True
+                rnd = self._round_full(db, rid)
+                if not rnd.get("practice"):
+                    self._apply_report(db, rnd)
+                db.execute("UPDATE report_rounds SET status = 'answered', submitted_at = CURRENT_TIMESTAMP WHERE id = %s", (rid,))
+                db.commit()
+                self._json_response({"ok": True})
+            else:
+                self._error(404, "Endpoint not found")
+            return True
+
+        # ── CEO'ens side ──
+        rid = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
+        sub = parts[3] if len(parts) > 3 else None
+        if method == "GET" and rid is None:
+            q = parse_qs(urlparse(self.path).query)
+            where, p = "", []
+            if q.get("meeting_id"):
+                where += " AND rr.meeting_id = %s"; p.append(int(q["meeting_id"][0]))
+            if q.get("area"):
+                where += " AND rr.area = %s"; p.append(q["area"][0])
+            rows = [dict(r) for r in db.execute(f"""
+                SELECT rr.id, rr.area, rr.meeting_id, rr.respondent_name, rr.status, rr.due_date, rr.created_at,
+                       rr.sent_at, rr.submitted_at, rr.ai_generated_at, rr.token,
+                       (SELECT COUNT(*) FROM report_items ri WHERE ri.round_id = rr.id) AS items_total,
+                       (SELECT COUNT(*) FROM report_items ri WHERE ri.round_id = rr.id AND ri.answer IS NOT NULL) AS items_answered
+                FROM report_rounds rr WHERE 1=1 {where} ORDER BY rr.created_at DESC""", p or None).fetchall()]
+            self._json_response(rows)
+        elif method == "GET":
+            rnd = self._round_full(db, rid)
+            if not rnd:
+                self._error(404, "Indrapportering ikke fundet"); return True
+            rnd["suggestions"] = self._cleanup_suggestions(db, rnd) if rnd["status"] != "draft" else []
+            self._json_response(rnd)
+        elif method == "POST" and sub == "apply-suggestion":
+            rnd = self._round_full(db, rid)
+            if rnd.get("practice"):
+                self._error(409, "Øvelse: forslag bliver ikke udført på rigtige data"); return True
+            sug = next((x for x in self._cleanup_suggestions(db, rnd) if x["id"] == body.get("id")), None)
+            if not sug:
+                self._error(404, "Forslaget findes ikke længere"); return True
+            for act in sug["actions"]:
+                if act["type"] == "tender_status":
+                    db.execute("UPDATE tenders SET status = %s WHERE id = %s", (act["status"], act["id"]))
+                    log_audit(db, uid, "update", "tender", act["id"], act["label"], {"status": act["status"]})
+                elif act["type"] == "close_task":
+                    db.execute("UPDATE tasks SET status = 'done', completed_at = CURRENT_TIMESTAMP WHERE id = %s", (act["id"],))
+            db.commit()
+            rnd = self._round_full(db, rid)
+            rnd["suggestions"] = self._cleanup_suggestions(db, rnd)
+            self._json_response(rnd)
+        elif method == "POST" and rid is None:
+            import secrets
+            user = db.execute("SELECT id, name FROM users WHERE id = %s", (body.get("respondent_user_id"),)).fetchone()
+            if not user:
+                self._error(400, "Vælg hvem der skal indrapportere"); return True
+            ai_q = bool(body.get("ai_questions"))
+            cur = db.execute("""INSERT INTO report_rounds (area, meeting_id, respondent_user_id, respondent_name, token, due_date,
+                                practice, ai_questions, status) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                             (body["area"], body.get("meeting_id"), user["id"], user["name"], secrets.token_urlsafe(24),
+                              body.get("due_date") or None, bool(body.get("practice")), ai_q, "draft" if ai_q else "open"))
+            new_id = cur.fetchone()["id"]
+            if body.get("items"):
+                # Spørgsmål givet på forhånd (fx formuleret af AI eller CEO'en) i stedet for skabelonen
+                for i, it in enumerate(body["items"]):
+                    db.execute("""INSERT INTO report_items (round_id, kind, ref_type, ref_id, company_id, title, context, sort_order)
+                                  VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+                               (new_id, it.get("kind", "topic"), it.get("ref_type"), it.get("ref_id"), it.get("company_id"),
+                                it["title"], json.dumps(it.get("context") or {}), i))
+            else:
+                self._build_report_items(db, new_id, body["area"], user["id"])
+            db.commit()
+            log_audit(db, uid, "create", "report_round", new_id, f"{body['area']} · {user['name']}")
+            db.commit()
+            self._json_response(self._round_full(db, new_id), 201)
+        elif method == "POST" and sub == "ai-generate":
+            # Laver spørgsmål til de næste emner, der stadig er skabelon. Frontend kalder igen, til remaining = 0.
+            rnd = self._round_full(db, rid)
+            pending = [it for it in rnd["items"] if it["kind"] not in ("topic", "matrix")]
+            batch = pending[: max(1, min(int(body.get("limit") or 4), 6))]
+            if not batch:
+                self._json_response({"remaining": 0, "done": len(rnd["items"])}); return True
+            try:
+                topics, model = self._generate_topics(db, rnd, batch)
+            except Exception as e:
+                self._error(502, f"AI kunne ikke lave spørgsmål: {e}"); return True
+            for t in topics:
+                if not (0 <= t["subject_index"] < len(batch)):
+                    continue
+                src = batch[t["subject_index"]]
+                ctx = {"facts": t["facts"], "why": t["why"], "ask_status": t["ask_status"], "questions": t["questions"][:4],
+                       "source_kind": src["kind"], "source": src.get("context"), "original_title": src["title"], "ai_model": model}
+                db.execute("UPDATE report_items SET kind = 'topic', title = %s, context = %s WHERE id = %s",
+                           (t["title"], json.dumps(ctx, default=_json_default), src["id"]))
+            # Emner AI'en sprang over beholder skabelonen, men markeres, så løkken ikke kører i ring
+            handled = {batch[t["subject_index"]]["id"] for t in topics if 0 <= t["subject_index"] < len(batch)}
+            for it in batch:
+                if it["id"] not in handled:
+                    db.execute("""UPDATE report_items SET kind = 'topic', context = %s WHERE id = %s""",
+                               (json.dumps({"facts": [], "why": "", "ask_status": True, "questions": [f"Hvad er status på {it['title']}?"],
+                                            "source_kind": it["kind"], "source": it.get("context")}, default=_json_default), it["id"]))
+            db.commit()
+            self._json_response({"remaining": len(pending) - len(batch), "done": len(rnd["items"]) - len(pending) + len(batch)})
+        elif method == "POST" and sub == "ai-patterns":
+            rnd = self._round_full(db, rid)
+            try:
+                topics, model = self._generate_patterns(db, rnd, rnd["items"])
+            except Exception as e:
+                self._error(502, f"AI kunne ikke finde mønstre: {e}"); return True
+            for i, t in enumerate(topics):
+                related = [rnd["items"][k]["title"] for k in t.get("related_subject_indexes", []) if 0 <= k < len(rnd["items"])]
+                db.execute("""INSERT INTO report_items (round_id, kind, title, context, sort_order) VALUES (%s,'topic',%s,%s,%s)""",
+                           (rid, t["title"], json.dumps({"facts": t["facts"], "why": t["why"], "ask_status": t["ask_status"],
+                                                         "questions": t["questions"][:4], "source_kind": "pattern",
+                                                         "related": related, "ai_model": model}), -10 + i))
+            db.commit()
+            self._json_response({"added": len(topics)})
+        elif sub == "items" and rid is not None:
+            item_id = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else None
+            if method == "POST":
+                db.execute("""INSERT INTO report_items (round_id, kind, title, context, sort_order)
+                              VALUES (%s,'topic',%s,%s,(SELECT COALESCE(MAX(sort_order),0)+1 FROM report_items WHERE round_id = %s))""",
+                           (rid, body.get("title") or "Nyt emne", json.dumps(body.get("context") or {"questions": [], "facts": [], "ask_status": False, "source_kind": "manual"}), rid))
+            elif method == "PUT" and item_id:
+                db.execute("UPDATE report_items SET title = COALESCE(%s, title), context = COALESCE(%s, context) WHERE id = %s AND round_id = %s",
+                           (body.get("title"), json.dumps(body["context"]) if "context" in body else None, item_id, rid))
+            elif method == "DELETE" and item_id:
+                db.execute("DELETE FROM report_items WHERE id = %s AND round_id = %s", (item_id, rid))
+            db.commit()
+            self._json_response(self._round_full(db, rid))
+        elif method == "POST" and sub == "sent":
+            db.execute("UPDATE report_rounds SET sent_at = COALESCE(sent_at, CURRENT_TIMESTAMP) WHERE id = %s", (rid,))
+            db.commit()
+            self._json_response(self._round_full(db, rid))
+        elif method == "POST" and sub == "slack":
+            if not os.environ.get("SLACK_BOT_TOKEN"):
+                self._error(400, "Slack er ikke sat op endnu"); return True
+            rnd = self._round_full(db, rid)
+            if not rnd.get("respondent_email"):
+                self._error(400, "Modtageren har ingen e-mail i Brugere"); return True
+            due = f" senest {rnd['due_date']}" if rnd.get("due_date") else ""
+            text = (f"Hej {rnd['respondent_name'].split(' ')[0]} \U0001F44B\nDer er indrapportering til næste opfølgningsmøde{due}. "
+                    f"Det tager ca. 10 minutter, og dine sidste svar er udfyldt på forhånd:\n{body.get('link')}")
+            try:
+                self._slack_dm(rnd["respondent_email"], text)
+            except Exception as e:
+                self._error(502, str(e)); return True
+            db.execute("UPDATE report_rounds SET sent_at = CURRENT_TIMESTAMP WHERE id = %s", (rid,))
+            db.commit()
+            self._json_response(self._round_full(db, rid))
+        elif method == "POST" and sub == "assess":
+            if not os.environ.get("ANTHROPIC_API_KEY"):
+                self._error(400, "AI-vurdering er ikke sat op endnu (ANTHROPIC_API_KEY mangler)"); return True
+            rnd = self._round_full(db, rid)
+            try:
+                text, model = self._assess_report(db, rnd)
+            except Exception as e:
+                self._error(502, f"AI-vurderingen fejlede: {e}"); return True
+            db.execute("UPDATE report_rounds SET ai_assessment = %s, ai_model = %s, ai_generated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                       (text, model, rid))
+            db.commit()
+            self._json_response(self._round_full(db, rid))
+        elif method == "PUT" and rid is not None:
+            if body.get("status") in ("draft", "open", "answered", "closed"):
+                db.execute("UPDATE report_rounds SET status = %s WHERE id = %s", (body["status"], rid))
+            if "due_date" in body:
+                db.execute("UPDATE report_rounds SET due_date = %s WHERE id = %s", (body["due_date"] or None, rid))
+            db.commit()
+            self._json_response(self._round_full(db, rid))
+        elif method == "DELETE" and rid is not None:
+            db.execute("DELETE FROM report_rounds WHERE id = %s", (rid,))
+            db.commit()
+            self._no_content()
+        else:
+            self._error(404, "Endpoint not found")
+        return True
 
     def log_message(self, format, *args):
         pass  # Suppress access logs

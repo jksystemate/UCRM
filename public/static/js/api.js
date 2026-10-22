@@ -242,6 +242,32 @@ export const api = {
     createAction: (data) => request('/actions', { method: 'POST', body: JSON.stringify(data) }),
     updateAction: (id, data) => request(`/actions/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
     deleteAction: (id) => request(`/actions/${id}`, { method: 'DELETE' }),
+
+    // Indrapportering før ledermøder
+    getReportConfig: () => request('/report-config'),
+    getReportRounds: (params = {}) => {
+        const qs = new URLSearchParams(params).toString();
+        return request(`/report-rounds${qs ? '?' + qs : ''}`);
+    },
+    getReportRound: (id) => request(`/report-rounds/${id}`),
+    createReportRound: (data) => request('/report-rounds', { method: 'POST', body: JSON.stringify(data) }),
+    markReportSent: (id) => request(`/report-rounds/${id}/sent`, { method: 'POST' }),
+    sendReportSlack: (id, link) => request(`/report-rounds/${id}/slack`, { method: 'POST', body: JSON.stringify({ link }) }),
+    assessReportRound: (id) => request(`/report-rounds/${id}/assess`, { method: 'POST' }),
+    updateReportRound: (id, data) => request(`/report-rounds/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+    deleteReportRound: (id) => request(`/report-rounds/${id}`, { method: 'DELETE' }),
+    // Indkøbsfællesskaber
+    getPurchasingGroups: () => request('/purchasing-groups'),
+    setPurchasingGroup: (companyId, isGroup) => request(`/companies/${companyId}/group`, { method: 'PUT', body: JSON.stringify({ is_purchasing_group: isGroup }) }),
+    addMembership: (companyId, groupId) => request(`/companies/${companyId}/memberships`, { method: 'POST', body: JSON.stringify({ group_id: groupId }) }),
+    removeMembership: (companyId, groupId) => request(`/companies/${companyId}/memberships/${groupId}`, { method: 'DELETE' }),
+    saveReportConfig: (data) => request('/report-config', { method: 'PUT', body: JSON.stringify(data) }),
+    aiGenerateReport: (id, limit = 4) => request(`/report-rounds/${id}/ai-generate`, { method: 'POST', body: JSON.stringify({ limit }) }),
+    aiReportPatterns: (id) => request(`/report-rounds/${id}/ai-patterns`, { method: 'POST' }),
+    addReportItem: (id, data) => request(`/report-rounds/${id}/items`, { method: 'POST', body: JSON.stringify(data) }),
+    updateReportItem: (id, itemId, data) => request(`/report-rounds/${id}/items/${itemId}`, { method: 'PUT', body: JSON.stringify(data) }),
+    deleteReportItem: (id, itemId) => request(`/report-rounds/${id}/items/${itemId}`, { method: 'DELETE' }),
+    applyReportSuggestion: (id, suggestionId) => request(`/report-rounds/${id}/apply-suggestion`, { method: 'POST', body: JSON.stringify({ id: suggestionId }) }),
 };
 
 window.api = api;

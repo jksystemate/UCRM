@@ -935,3 +935,21 @@ th.cursor-pointer:hover { color: #374151; }
 .att-bar { display: flex; gap: 2px; height: 22px; border-radius: 6px; overflow: hidden; background: var(--surface2); }
 .att-bar i { display: flex; align-items: center; justify-content: center; font-style: normal; font-size: 11px; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; }
 .att-salg { background: var(--area-salg); } .att-leverance { background: var(--area-leverance); } .att-oekonomi { background: var(--area-oekonomi); }
+
+/* ─── Opgaver og målkvalitet ─── */
+.todo-row { padding: 12px 18px; border-bottom: 1px solid var(--surface2); }
+.todo-row.late { background: #fdf7f6; }
+.todo-detail { margin: 10px 0 2px 32px; }
+.quality-box { padding: 12px 16px; border-radius: 12px; background: var(--warn-soft); }
+.lead-grid { display: grid; grid-template-columns: 50px repeat(4, 1fr); gap: 6px 8px; font-size: 13px; align-items: center; }
+.lead-grid .lh { font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
+.lead-grid .bad { color: var(--bad); font-weight: 700; } .lead-grid .warn { color: var(--warn); font-weight: 600; } .lead-grid .good { color: var(--good); font-weight: 600; }
+
+/* ─── Opfølgning på ledernes opgaver ─── */
+.fu-panel { background: var(--surface); border: 1px solid #e1e8ee; border-left: 4px solid var(--gold, #c3a95c); border-radius: var(--radius); box-shadow: var(--shadow); padding: 14px 18px; }
+.fu-card { border: 1px solid var(--border); border-radius: 10px; padding: 12px; background: var(--surface2); }
+.sig { padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+.sig-kritisk { background: var(--bad-soft); color: var(--bad); }
+.sig-vigtig { background: var(--warn-soft); color: var(--warn); }
+.sig-tips { background: var(--surface2); color: var(--muted); border: 1px solid var(--border); }
+.fu-pending { margin: 4px 0 8px; padding: 6px 8px; border-radius: 8px; background: var(--warn-soft); color: var(--warn); font-size: 12.5px; font-weight: 600; display: flex; align-items: center; justify-content: space-between; }

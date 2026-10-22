@@ -240,6 +240,10 @@ export const api = {
         const qs = new URLSearchParams(params).toString();
         return request(`/actions${qs ? '?' + qs : ''}`);
     },
+    getFollowupSettings: () => request('/ceo/followup-settings'),
+    saveFollowupSettings: (data) => request('/ceo/followup-settings', { method: 'PUT', body: JSON.stringify(data) }),
+    requestTaskStatus: (role, sendSlack = false) => request('/ceo/followup', { method: 'POST', body: JSON.stringify({ role, send_slack: sendSlack, origin: location.origin }) }),
+    breakdownTask: (data) => request('/actions/breakdown', { method: 'POST', body: JSON.stringify(data) }),
     createAction: (data) => request('/actions', { method: 'POST', body: JSON.stringify(data) }),
     updateAction: (id, data) => request(`/actions/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
     deleteAction: (id) => request(`/actions/${id}`, { method: 'DELETE' }),
@@ -253,7 +257,7 @@ export const api = {
     getReportRound: (id) => request(`/report-rounds/${id}`),
     createReportRound: (data) => request('/report-rounds', { method: 'POST', body: JSON.stringify(data) }),
     markReportSent: (id) => request(`/report-rounds/${id}/sent`, { method: 'POST' }),
-    sendReportSlack: (id, link) => request(`/report-rounds/${id}/slack`, { method: 'POST', body: JSON.stringify({ link }) }),
+    sendReportSlack: (id, link, text = null) => request(`/report-rounds/${id}/slack`, { method: 'POST', body: JSON.stringify({ link, text }) }),
     assessReportRound: (id) => request(`/report-rounds/${id}/assess`, { method: 'POST' }),
     updateReportRound: (id, data) => request(`/report-rounds/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
     deleteReportRound: (id) => request(`/report-rounds/${id}`, { method: 'DELETE' }),

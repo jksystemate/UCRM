@@ -42,5 +42,11 @@
       "src": "/(.*)",
       "dest": "/public/index.html"
     }
+  ],
+  "crons": [
+    {
+      "path": "/api/cron/task-followup",
+      "schedule": "0 6 * * 1-5"
+    }
   ]
 }

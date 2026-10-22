@@ -1,4 +1,4 @@
-import { api } from './api.js?v=44';
+import { api } from './api.js?v=46';
 
 // ─── Constants ───
 const CATEGORY_LABELS = { opkald:'Opkald', tilbud:'Tilbud', moede:'Møde', opfølgning:'Opfølgning', demo:'Demo', kontrakt:'Kontrakt', implementering:'Implementering', support:'Support', faktura:'Fakturering', budget:'Budget', generelt:'Generelt' };
@@ -57,6 +57,8 @@ async function router() {
             await renderGoalDetail(content, parseInt(parts[1]));
         } else if (parts[0] === 'goals') {
             await renderGoals(content);
+        } else if (parts[0] === 'todo') {
+            await renderTodo(content);
         } else if (parts[0] === 'reports' && parts[1]) {
             await renderReportRound(content, parseInt(parts[1]));
         } else if (parts[0] === 'meetings' && parts[1]) {
@@ -4395,6 +4397,7 @@ function goalCard(g, opts = {}) {
             h('span', { className: `area-pill area-${g.area}` }, GOAL_AREAS[g.area] || g.area),
             h('span', { className: 'goal-kind' }, GOAL_KIND_LABELS[g.kind] || g.kind),
             g.owner_role ? h('span', { className: 'goal-owner' }, g.owner_role) : null,
+            qualityBadge(g),
             h('span', { className: 'ml-auto' }, goalStatusPill(g.status))
         ),
         h('div', { className: 'goal-title' }, g.title),
@@ -4657,6 +4660,12 @@ async function renderGoalDetail(container, id) {
         tile(g.due_date ? formatDate(g.due_date) : '–', 'Deadline', g.due_date ? `${Math.max(0, daysBetween(todayIso(), g.due_date))} dage tilbage` : 'ingen deadline')
     ));
 
+    if (g.quality_missing?.length) {
+        container.appendChild(h('div', { className: 'quality-box mb-6' },
+            h('div', { className: 'flex items-center gap-2 mb-1' }, qualityBadge(g), h('b', {}, 'Gør målet mere konkret')),
+            h('div', { className: 'text-sm text-gray-700' }, 'Mangler: ' + g.quality_missing.join(', ') + '.'),
+            h('button', { className: 'act-btn mt-2', onClick: () => showGoalForm(g) }, 'Ret målet')));
+    }
     const chart = goalHistoryChart(g);
     if (chart) container.appendChild(chart);
 
@@ -5838,6 +5847,19 @@ async function renderCoach(view, aiOn) {
                 m.attention_pct[k] ? h('i', { className: `att-${k}`, style: `flex:${m.attention_pct[k]}`, title: `${l} ${m.attention_pct[k]} %` }, `${l} ${m.attention_pct[k]} %`) : null))
             : h('div', { className: 'text-xs text-gray-400' }, 'Ingen møder, opdateringer eller aktioner endnu.')));
 
+    // Mål pr. leder: kort/lang, kvalitet og opfølgning
+    view.appendChild(h('div', { className: 'as-ai' },
+        h('div', { className: 'font-semibold text-gray-900 mb-2' }, 'Mål pr. leder'),
+        h('div', { className: 'lead-grid' },
+            h('span', { className: 'lh' }, ''), h('span', { className: 'lh' }, 'Kort'), h('span', { className: 'lh' }, 'Lang'), h('span', { className: 'lh' }, 'Konkret'), h('span', { className: 'lh' }, 'Fulgt op'),
+            ...Object.entries(m.leaders || {}).flatMap(([k, L]) => [
+                h('b', {}, L.role),
+                h('span', { className: L.drift ? '' : 'bad' }, String(L.drift)),
+                h('span', { className: L.strategisk ? '' : 'bad' }, String(L.strategisk)),
+                h('span', { className: L.quality == null ? '' : L.quality >= 80 ? 'good' : L.quality >= 60 ? 'warn' : 'bad' }, L.quality == null ? '–' : `${L.quality} %`),
+                h('span', { className: L.stale ? 'warn' : 'good' }, L.last_update ? formatDate(L.last_update) : 'aldrig'),
+            ]))));
+
     const KIND = { udfordring: ['Udfordring', 'gs-bad'], refleksion: ['Til refleksion', 'gs-warn'], styrke: ['Styrke', 'gs-good'] };
     view.appendChild(h('div', { className: 'as-sec' }, `Observationer (${mirror.observations.length})`));
     if (!mirror.observations.length) view.appendChild(h('div', { className: 'text-sm text-gray-500 p-2' }, 'Ingen observationer endnu. Der er for lidt historik.'));
@@ -5944,4 +5966,204 @@ function renderFollowupSection(r) {
         box.appendChild(h('div', { className: 'text-sm text-gray-400' }, 'Kan stilles, når der er svar.'));
     }
     return box;
+}
+
+
+// Målkvalitet: hvor konkret er målet (måltal, deadline, ansvarlig, målemetode, enhed, milepæle, opfølgning)
+function qualityBadge(g) {
+    if (g.quality == null) return null;
+    const cls = g.quality >= 80 ? 'gs-good' : g.quality >= 60 ? 'gs-warn' : 'gs-bad';
+    const label = g.quality >= 80 ? 'Konkret' : g.quality >= 60 ? 'Delvist konkret' : 'Uklart';
+    return h('span', { className: `gs-pill ${cls}`, title: g.quality_missing?.length ? 'Mangler: ' + g.quality_missing.join(', ') : 'Alt er på plads' }, `${label} ${g.quality} %`);
+}
+
+// ─── Opgaver: alt CEO'en skal følge op på (fra møder eller bare opgaver som lønsamtaler) ───
+const OWNER_OPTIONS = ['CEO', 'CCO', 'COO', 'CFO'];
+async function renderTodo(container) {
+    container.innerHTML = '<div class="text-gray-400">Indlæser...</div>';
+    const [acts, cfg, users, fu] = await Promise.all([api.getActions({ kind: 'aktion' }), api.getReportConfig().catch(() => ({})),
+        api.getUsers().catch(() => []), api.getFollowupSettings().catch(() => null)]);
+    const signals = fu?.signals || {};
+    container.innerHTML = '';
+    container.className = 'ml-64 p-8 fade-in';
+    const filter = sessionStorage.getItem('todoFilter') || 'open';
+    const today = todayIso();
+    const isLate = a => a.status === 'open' && a.due_date && String(a.due_date).slice(0, 10) < today;
+    const FILTERS = {
+        mine: ['Mine (CEO)', a => a.status === 'open' && /^ceo/i.test(a.owner || '')],
+        open: ['Alle åbne', a => a.status === 'open'],
+        late: ['Over frist', isLate],
+        done: ['Udført', a => a.status === 'done'],
+    };
+    const list = acts.filter(FILTERS[filter][1]);
+
+    container.appendChild(h('div', { className: 'flex justify-between items-center mb-6' },
+        h('div', {},
+            h('h1', { className: 'text-2xl font-bold text-gray-900' }, 'Opgaver'),
+            h('p', { className: 'text-gray-500 mt-1' }, 'Alt du skal følge op på: aktioner fra ledermøderne og andre opgaver, fx lønsamtaler. Lederens opgaver kommer med i indrapporteringen.')),
+        h('button', { className: 'bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 font-medium', onClick: () => showTaskEditForm(null, cfg, users) }, '+ Ny opgave')));
+    if (fu) container.appendChild(renderFollowupPanel(fu, users));
+    container.appendChild(h('div', { className: 'mb-5' }, h('div', { className: 'area-tabs' },
+        ...Object.entries(FILTERS).map(([k, [label, fn]]) => h('button', { className: k === filter ? 'on' : '',
+            onClick: () => { sessionStorage.setItem('todoFilter', k); router(); } }, `${label} · ${acts.filter(fn).length}`)))));
+
+    if (!list.length) {
+        container.appendChild(h('div', { className: 'empty-box' }, filter === 'late' ? 'Ingen opgaver over frist.' : 'Ingen opgaver her.'));
+        return;
+    }
+    // Grupperet efter ansvarlig
+    const groups = {};
+    for (const a of list) (groups[(a.owner || 'Ingen ansvarlig').trim()] ||= []).push(a);
+    const order = k => { const i = OWNER_OPTIONS.indexOf(k.toUpperCase()); return i === -1 ? 10 : i; };
+    for (const owner of Object.keys(groups).sort((x, y) => order(x) - order(y) || x.localeCompare(y, 'da'))) {
+        const its = groups[owner].sort((x, y) => String(x.due_date || '9999').localeCompare(String(y.due_date || '9999')));
+        container.appendChild(h('div', { className: 'flex items-center gap-2 mb-2 mt-4' },
+            h('span', { className: 'meet-role' }, owner), h('span', { className: 'text-sm text-gray-500' }, `${its.length} opgave${its.length === 1 ? '' : 'r'}`)));
+        const box = h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden' });
+        for (const a of its) box.appendChild(todoRow(a, cfg, users, isLate(a), signals[a.id] || []));
+        container.appendChild(box);
+    }
+}
+
+function todoRow(a, cfg, users, late, sigs = []) {
+    const cl = a.checklist || [];
+    const detail = h('div', { className: 'todo-detail', style: 'display:none' });
+    const drawDetail = () => {
+        detail.innerHTML = '';
+        if (a.description) detail.appendChild(h('div', { className: 'text-sm text-gray-700 mb-2 whitespace-pre-wrap' }, a.description));
+        if (cl.length) detail.appendChild(h('div', { className: 'space-y-1 mb-2' }, ...cl.map((c, i) => {
+            const cb = h('input', { type: 'checkbox', ...(c.done ? { checked: '' } : {}) });
+            cb.addEventListener('change', async () => { cl[i].done = cb.checked; await api.updateAction(a.id, { checklist: cl }); router(); });
+            return h('label', { className: `flex items-center gap-2 text-sm ${c.done ? 'line-through text-gray-400' : 'text-gray-800'}` }, cb, c.text);
+        })));
+        if (a.notes) detail.appendChild(h('div', { className: 'text-xs text-gray-500 whitespace-pre-wrap border-t border-gray-100 pt-2 mt-2' }, a.notes));
+        detail.appendChild(h('div', { className: 'flex gap-3 mt-2 text-sm' },
+            h('button', { className: 'font-semibold text-blue-600 hover:underline', onClick: () => showTaskEditForm(a, cfg, users) }, 'Rediger'),
+            h('button', { className: 'text-red-600 hover:underline', onClick: async () => { if (confirm(`Slet opgaven "${a.title}"?`)) { await api.deleteAction(a.id); router(); } } }, 'Slet')));
+    };
+    drawDetail();
+    const done = a.status === 'done';
+    const cb = h('button', { className: `w-5 h-5 rounded border-2 flex-shrink-0 ${done ? 'bg-green-500 border-green-500' : 'border-gray-300 hover:border-green-500'}`, title: done ? 'Genåbn' : 'Markér som udført',
+        onClick: async (e) => { e.stopPropagation(); await api.updateAction(a.id, { status: done ? 'open' : 'done' }); router(); } },
+        done ? h('span', { className: 'text-white text-xs flex items-center justify-center', innerHTML: '✓' }) : null);
+    const row = h('div', { className: `todo-row ${late ? 'late' : ''}` },
+        h('div', { className: 'flex items-center gap-3 cursor-pointer', onClick: () => { detail.style.display = detail.style.display === 'none' ? '' : 'none'; } },
+            cb,
+            h('div', { className: 'flex-1 min-w-0' },
+                h('div', { className: `font-medium ${done ? 'line-through text-gray-400' : 'text-gray-900'}` }, a.title),
+                h('div', { className: 'flex flex-wrap gap-2 mt-0.5 items-center text-xs text-gray-500' },
+                    a.area && GOAL_AREAS[a.area] ? h('span', { className: `area-pill area-${a.area}` }, a.area === 'tvaers' ? 'Tværgående' : GOAL_AREAS[a.area]) : null,
+                    cl.length ? h('span', {}, `${cl.filter(c => c.done).length}/${cl.length} punkter`) : null,
+                    a.goal_title ? h('span', {}, `Mål: ${a.goal_title}`) : null,
+                    a.meeting_date ? h('span', {}, `fra møde ${formatDate(a.meeting_date)}`) : null,
+                    a.notes ? h('span', {}, `Sidst: ${a.notes.split('\n').pop().slice(0, 60)}`) : null,
+                    ...sigs.filter(([sev, text]) => !/over frist/.test(text)).map(([sev, text]) => h('span', { className: `sig sig-${sev}` }, text)))),
+            a.due_date ? h('div', { className: `text-sm ${late ? 'text-red-600 font-medium' : 'text-gray-400'}` }, (late ? 'Over frist · ' : '') + formatDate(a.due_date)) : h('div', { className: 'text-xs text-yellow-700' }, 'Ingen frist')),
+        detail);
+    return row;
+}
+
+function showTaskEditForm(existing, cfg, users) {
+    const a = existing || { area: 'tvaers', owner: 'CEO', due_date: addDaysIso(14), checklist: [] };
+    const owners = [...OWNER_OPTIONS, ...users.filter(u => !u.deleted_at).map(u => u.name)];
+    const clText = h('textarea', { name: 'checklist', rows: '5', className: 'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm', placeholder: 'Én linje pr. punkt, fx én pr. medarbejder' },
+        (a.checklist || []).map(c => c.text).join('\n'));
+    const form = h('form', { className: 'space-y-4', onSubmit: async (e) => {
+        e.preventDefault();
+        const fd = new FormData(e.target);
+        const prev = Object.fromEntries((a.checklist || []).map(c => [c.text, c.done]));
+        const data = { kind: 'aktion', title: fd.get('title'), owner: fd.get('owner') || null, due_date: fd.get('due_date') || null,
+            area: fd.get('area'), description: fd.get('description') || null,
+            checklist: String(fd.get('checklist') || '').split('\n').map(x => x.trim()).filter(Boolean).map(t => ({ text: t, done: !!prev[t] })) };
+        try { existing ? await api.updateAction(existing.id, data) : await api.createAction(data); closeModal(); router(); }
+        catch (err) { alert(err.message); }
+    }},
+        formField('Opgave *', 'title', a.title || '', 'text', true),
+        h('div', { className: 'grid grid-cols-3 gap-3' },
+            h('div', {}, h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, 'Ansvarlig'),
+                h('input', { name: 'owner', value: a.owner || '', list: 'task-owner-options', className: 'w-full border border-gray-300 rounded-lg px-3 py-2' }),
+                h('datalist', { id: 'task-owner-options' }, ...owners.map(o => h('option', { value: o })))),
+            formField('Frist', 'due_date', (a.due_date || '').slice(0, 10), 'date'),
+            h('div', {}, h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, 'Område'),
+                h('select', { name: 'area', className: 'w-full border border-gray-300 rounded-lg px-3 py-2' },
+                    ...Object.entries({ tvaers: 'Tværgående / organisation', salg: 'Salg & marketing', leverance: 'Leverance', oekonomi: 'Økonomi' })
+                        .map(([k, v]) => h('option', { value: k, ...(a.area === k ? { selected: '' } : {}) }, v))))),
+        h('div', {}, h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, 'Beskrivelse'),
+            h('textarea', { name: 'description', rows: '2', className: 'w-full border border-gray-300 rounded-lg px-3 py-2' }, a.description || '')),
+        h('div', {},
+            h('div', { className: 'flex items-center justify-between mb-1' },
+                h('label', { className: 'text-sm font-medium text-gray-700' }, 'Tjekliste'),
+                cfg.ai ? h('button', { type: 'button', className: 'text-sm font-semibold text-blue-600 hover:underline', onClick: async (e) => {
+                    const f = e.target.closest('form');
+                    e.target.textContent = 'Bryder ned…';
+                    try {
+                        const res = await api.breakdownTask({ title: f.title.value, description: f.description.value, owner: f.owner.value, due_date: f.due_date.value });
+                        clText.value = [clText.value.trim(), ...res.items].filter(Boolean).join('\n');
+                    } catch (err) { alert(err.message); }
+                    e.target.textContent = '✦ Bryd ned med AI';
+                } }, '✦ Bryd ned med AI') : null),
+            clText),
+        h('div', { className: 'flex justify-end gap-3 pt-2' },
+            h('button', { type: 'button', className: 'px-4 py-2 text-gray-600', onClick: closeModal }, 'Annuller'),
+            h('button', { type: 'submit', className: 'bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 font-medium' }, existing ? 'Gem' : 'Opret opgave')));
+    showModal(existing ? 'Rediger opgave' : 'Ny opgave', form, 'max-w-xl');
+}
+
+
+// Opfølgning på ledernes opgaver: bed om status nu (AI skriver beskeden) eller lad AI følge op automatisk
+function renderFollowupPanel(fu, users) {
+    const roles = [['CCO', 'Salg & marketing'], ['COO', 'Leverance'], ['CFO', 'Økonomi']];
+    const box = h('div', { className: 'fu-panel mb-6' },
+        h('div', { className: 'flex items-center justify-between mb-3' },
+            h('div', {}, h('b', { className: 'text-gray-900' }, '✦ Opfølgning på ledernes opgaver'),
+                h('div', { className: 'text-xs text-gray-500' }, 'AI skriver en kort besked om de opgaver, der halter, med et link hvor lederen melder status med et klik.'))));
+    const grid = h('div', { className: 'grid grid-cols-1 md:grid-cols-3 gap-3' });
+    const save = async () => { await api.saveFollowupSettings({ role_users: fu.role_users, auto: fu.auto, base_url: location.origin }); };
+    for (const [role, label] of roles) {
+        const sm = fu.summary?.[role] || {};
+        const sel = h('select', { className: 'border border-gray-300 rounded-lg px-2 py-1 text-sm flex-1' },
+            h('option', { value: '' }, `Hvem er ${role}?`),
+            ...users.filter(u => !u.deleted_at).map(u => h('option', { value: u.id, ...(String(fu.role_users[role] || '') === String(u.id) ? { selected: '' } : {}) }, u.name)));
+        sel.addEventListener('change', async () => { fu.role_users[role] = sel.value ? parseInt(sel.value) : null; await save(); });
+        const auto = h('input', { type: 'checkbox', ...(fu.auto[role] ? { checked: '' } : {}) });
+        auto.addEventListener('change', async () => {
+            if (auto.checked && !fu.role_users[role]) { alert(`Vælg først hvem der er ${role}.`); auto.checked = false; return; }
+            fu.auto[role] = auto.checked; await save();
+        });
+        grid.appendChild(h('div', { className: 'fu-card' },
+            h('div', { className: 'flex items-center gap-2 mb-2' }, h('span', { className: 'meet-role' }, role), h('span', { className: 'text-sm text-gray-600' }, label)),
+            h('div', { className: 'flex gap-2 mb-2' }, sel),
+            h('div', { className: 'text-sm mb-2' },
+                h('b', { className: sm.flagged ? 'text-red-600' : 'text-gray-800' }, `${sm.flagged || 0} halter`),
+                h('span', { className: 'text-gray-500' }, ` af ${sm.open || 0} åbne opgaver`),
+                sm.last_request ? h('div', { className: 'text-xs text-gray-400' }, `Sidst spurgt ${formatDate(sm.last_request)}`) : null),
+            sm.pending ? h('div', { className: 'fu-pending' }, 'Forespørgsel klar, men ikke sendt',
+                h('button', { className: 'act-btn ml-2', onClick: () => showFollowupMessage({ ...sm.pending, link: `${location.origin}/r/${sm.pending.token}`, tasks: [] }, fu) }, 'Vis besked')) : null,
+            h('div', { className: 'flex items-center justify-between gap-2' },
+                h('button', { className: 'act-btn primary', ...(sm.open ? {} : { disabled: '' }), onClick: async (e) => {
+                    if (!fu.role_users[role]) { alert(`Vælg først hvem der er ${role}.`); return; }
+                    e.target.disabled = true; e.target.textContent = 'Skriver besked…';
+                    try { showFollowupMessage(await api.requestTaskStatus(role), fu); }
+                    catch (err) { alert(err.message); }
+                    e.target.disabled = false; e.target.textContent = 'Bed om status nu';
+                } }, 'Bed om status nu'),
+                h('label', { className: 'flex items-center gap-1 text-xs text-gray-600', title: fu.slack ? 'Sender i Slack hver hverdagsmorgen, når opgaver halter (højst hver 3. dag)' : 'Uden Slack laves forespørgslen, og du får besked i klokken med beskeden klar' },
+                    auto, 'AI følger op automatisk'))));
+    }
+    box.appendChild(grid);
+    if (!fu.slack) box.appendChild(h('div', { className: 'text-xs text-gray-500 mt-2' }, 'Slack er ikke sat op: automatisk opfølgning laver forespørgslen og giver dig besked i klokken, så du kan sende den.'));
+    return box;
+}
+
+function showFollowupMessage(res, fu) {
+    const ta = h('textarea', { rows: '8', className: 'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm' }, res.message);
+    showModal(`Statusforespørgsel til ${res.respondent}`, h('div', { className: 'space-y-3' },
+        h('p', { className: 'text-sm text-gray-600' }, (res.tasks.length ? `Om ${res.tasks.length} opgave${res.tasks.length === 1 ? '' : 'r'}: ${res.tasks.join(', ')}. ` : '') + 'Ret beskeden, hvis du vil, og send den.'),
+        ta,
+        h('div', { className: 'flex gap-2 flex-wrap justify-end' },
+            h('a', { href: res.link, target: '_blank', className: 'act-btn' }, 'Se som modtager'),
+            h('button', { className: 'act-btn', onClick: async (e) => { await navigator.clipboard.writeText(ta.value); await api.markReportSent(res.round_id); e.target.textContent = 'Kopieret ✓'; if (location.hash === '#/todo') setTimeout(router, 800); } }, 'Kopiér besked'),
+            fu.slack ? h('button', { className: 'act-btn primary', onClick: async (e) => {
+                try { await api.sendReportSlack(res.round_id, res.link, ta.value); e.target.textContent = 'Sendt ✓'; } catch (err) { alert(err.message); }
+            } }, 'Send i Slack') : null)));
 }

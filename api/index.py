@@ -106,6 +106,21 @@ ANSWER_FORMAT_RULES = (
     "Det afklares i en fælles klik-liste. Max 3 spørgsmål pr. emne, og hellere 2.")
 
 
+def goal_quality(g):
+    """Hvor konkret er målet? Returnerer (score 0–100, liste over det der mangler)."""
+    checks = [
+        (g.get("target_value") is not None or (g.get("milestones_total") or 0) >= 2, "måltal eller milepæle"),
+        (bool(g.get("due_date")), "deadline"),
+        (bool(g.get("owner_role")), "ansvarlig"),
+        (bool((g.get("description") or "").strip()), "beskrivelse af hvordan det måles"),
+        (g.get("target_value") is None or bool(g.get("unit")), "enhed"),
+        (g.get("kind") != "strategisk" or (g.get("milestones_total") or 0) >= 2, "milepæle (strategisk)"),
+        (bool(g.get("last_checkin")) and (date.today() - date.fromisoformat(str(g["last_checkin"])[:10])).days <= 30, "statusopdatering inden for 30 dage"),
+    ]
+    missing = [label for ok, label in checks if not ok]
+    return round((len(checks) - len(missing)) / len(checks) * 100), missing
+
+
 def _goal_expected(g):
     """Forventet fremdrift 0–1 ved lineær plan fra start til deadline (samme logik som i frontend)."""
     due = str(g.get("due_date") or "")[:10]
@@ -550,6 +565,7 @@ def init_db():
             "ALTER TABLE report_rounds ADD COLUMN IF NOT EXISTS practice BOOLEAN DEFAULT FALSE",
             "ALTER TABLE report_rounds ADD COLUMN IF NOT EXISTS ai_questions BOOLEAN DEFAULT FALSE",
             "ALTER TABLE report_rounds ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMP",
+            "ALTER TABLE report_rounds ADD COLUMN IF NOT EXISTS message TEXT",
             "ALTER TABLE report_rounds ADD COLUMN IF NOT EXISTS followup_of INTEGER REFERENCES report_rounds(id) ON DELETE CASCADE",
             # Notifikationer kan også pege på andet end en virksomhed (fx en indsendt indrapportering)
             "ALTER TABLE notifications ALTER COLUMN company_id DROP NOT NULL",
@@ -576,6 +592,10 @@ def init_db():
             "ALTER TABLE companies ADD COLUMN IF NOT EXISTS sales_type TEXT",
             "ALTER TABLE companies ADD COLUMN IF NOT EXISTS sales_phase TEXT",
             "ALTER TABLE companies ADD COLUMN IF NOT EXISTS sales_phase_updated DATE",
+            # Opgaver (fx lønsamtaler): aktioner kan stå alene, have beskrivelse, tjekliste og en log med noter
+            "ALTER TABLE meeting_actions ADD COLUMN IF NOT EXISTS description TEXT",
+            "ALTER TABLE meeting_actions ADD COLUMN IF NOT EXISTS checklist JSONB DEFAULT '[]'::jsonb",
+            "ALTER TABLE meeting_actions ADD COLUMN IF NOT EXISTS notes TEXT",
             "ALTER TABLE tenders ADD COLUMN IF NOT EXISTS via_group_id INTEGER REFERENCES companies(id) ON DELETE SET NULL",
             """CREATE TABLE IF NOT EXISTS app_settings (
                 key TEXT PRIMARY KEY,
@@ -2735,7 +2755,7 @@ class handler(BaseHTTPRequestHandler):
         return row["name"] if row else None
 
     def _goal_rows(self, db, where="", params=None):
-        return [dict(r) for r in db.execute(f"""
+        rows = [dict(r) for r in db.execute(f"""
             SELECT g.*, co.name AS company_name,
                    (SELECT COUNT(*) FROM goal_milestones m WHERE m.goal_id = g.id) AS milestones_total,
                    (SELECT COUNT(*) FROM goal_milestones m WHERE m.goal_id = g.id AND m.done) AS milestones_done,
@@ -2745,6 +2765,9 @@ class handler(BaseHTTPRequestHandler):
             WHERE 1=1 {where}
             ORDER BY CASE g.kind WHEN 'drift' THEN 0 ELSE 1 END, g.due_date ASC NULLS LAST, g.id
         """, params).fetchall()]
+        for g in rows:
+            g["quality"], g["quality_missing"] = goal_quality(g)
+        return rows
 
     def _action_rows(self, db, where="", params=None):
         return [dict(r) for r in db.execute(f"""
@@ -2764,7 +2787,7 @@ class handler(BaseHTTPRequestHandler):
         if path == "/api/purchasing-groups" or (path.startswith("/api/companies/") and ("/memberships" in path or path.endswith("/group"))):
             return self._handle_groups(db, method, path, body, uid)
         if not (path.startswith("/api/goals") or path.startswith("/api/meetings") or path.startswith("/api/actions")
-                or path.startswith("/api/milestones") or path.startswith("/api/ceo/")):
+                or path.startswith("/api/milestones") or path.startswith("/api/ceo/") or path.startswith("/api/cron/")):
             return False
         parts = path.strip("/").split("/")  # e.g. ['api', 'goals', '3', 'checkins']
         res = parts[1]
@@ -2774,7 +2797,13 @@ class handler(BaseHTTPRequestHandler):
         GOAL_FIELDS = ["area", "kind", "title", "description", "owner_role", "company_id", "unit", "start_value",
                        "target_value", "current_value", "start_date", "due_date", "status", "archived"]
         MEETING_FIELDS = ["area", "title", "meeting_date", "participants", "status", "summary", "next_meeting_date"]
-        ACTION_FIELDS = ["meeting_id", "area", "goal_id", "company_id", "kind", "title", "owner", "due_date", "status"]
+        ACTION_FIELDS = ["meeting_id", "area", "goal_id", "company_id", "kind", "title", "owner", "due_date", "status",
+                         "description", "checklist", "notes"]
+        def action_vals(src):
+            vals = {k: blank_to_none(src.get(k)) for k in ACTION_FIELDS if k in src}
+            if "checklist" in vals:
+                vals["checklist"] = json.dumps(vals["checklist"] or [])
+            return vals
 
         def blank_to_none(v):
             return None if v == "" else v
@@ -2782,6 +2811,8 @@ class handler(BaseHTTPRequestHandler):
         # ── Overview for Overblik ──
         if path.startswith("/api/ceo/assistant"):
             return self._handle_assistant(db, method, path, body)
+        if path in ("/api/ceo/followup-settings", "/api/ceo/followup") or path.startswith("/api/cron/"):
+            return self._handle_task_followup(db, method, path, body)
         if res == "ceo" and method == "GET":
             goals = self._goal_rows(db, "AND NOT g.archived")
             actions = self._action_rows(db, "AND a.status = 'open'")
@@ -2985,15 +3016,35 @@ class handler(BaseHTTPRequestHandler):
 
         # ── Actions & decisions ──
         if res == "actions":
+            if method == "POST" and len(parts) > 2 and parts[2] == "breakdown":
+                # AI foreslår delopgaver til en opgave (fx "Lønsamtaler" → forberedelse, samtaler, opfølgning)
+                if not os.environ.get("ANTHROPIC_API_KEY"):
+                    self._error(400, "AI er ikke slået til endnu"); return True
+                system = ("Du hjælper CEO'en i Systemate med at bryde en ledelsesopgave ned i 3–8 konkrete, afkrydsbare delopgaver "
+                          "i den rækkefølge de skal gøres. Skriv på dansk, korte linjer. Tilføj ikke navne, der ikke står i opgaven.")
+                schema = {"type": "object", "additionalProperties": False, "required": ["items"],
+                          "properties": {"items": {"type": "array", "items": {"type": "string"}}}}
+                try:
+                    data, _ = self._claude(system, json.dumps({"opgave": body.get("title"), "beskrivelse": body.get("description"),
+                                                               "ansvarlig": body.get("owner"), "frist": body.get("due_date")}, ensure_ascii=False),
+                                           schema, effort="low", max_tokens=1500)
+                except Exception as e:
+                    self._error(502, f"AI kunne ikke bryde opgaven ned: {e}"); return True
+                self._json_response({"items": data["items"][:10]})
+                return True
             if method == "GET" and rid is None:
                 where, p = "", []
                 if params.get("area"):
                     where += " AND a.area = %s"; p.append(params["area"][0])
                 if params.get("status"):
                     where += " AND a.status = %s"; p.append(params["status"][0])
+                if params.get("owner"):
+                    where += " AND a.owner ILIKE %s"; p.append(params["owner"][0] + "%")
+                if params.get("kind"):
+                    where += " AND a.kind = %s"; p.append(params["kind"][0])
                 self._json_response(self._action_rows(db, where, p or None))
             elif method == "POST":
-                vals = {k: blank_to_none(body.get(k)) for k in ACTION_FIELDS if k in body}
+                vals = action_vals(body)
                 if not vals.get("title") or not vals.get("area"):
                     self._error(400, "Titel og område mangler"); return True
                 cols = list(vals.keys())
@@ -3003,7 +3054,7 @@ class handler(BaseHTTPRequestHandler):
                 db.commit()
                 self._json_response(self._action_rows(db, "AND a.id = %s", (aid,))[0], 201)
             elif method == "PUT" and rid is not None:
-                vals = {k: blank_to_none(body.get(k)) for k in ACTION_FIELDS if k in body}
+                vals = action_vals(body)
                 if "status" in body:
                     vals["done_at"] = datetime.now() if body["status"] == "done" else None
                     vals["closed_in_meeting_id"] = body.get("closed_in_meeting_id") if body["status"] == "done" else None
@@ -3069,12 +3120,29 @@ class handler(BaseHTTPRequestHandler):
             if g["status"] in ("off_track", "at_risk") and not g.get("open_actions"):
                 add(f"goal-noaction-{g['id']}", "kritisk", g["area"], f"\u201d{g['title']}\u201d er {'bagud' if g['status'] == 'off_track' else 'i risiko'} uden en aktion",
                     "Der er ingen åbne aktioner, der skal bringe målet på sporet.", "Aftal en aktion med ansvarlig og frist", gl)
+        # Hver leder skal have både kortsigtede og langsigtede mål
+        for a, rl in (("salg", "CCO"), ("leverance", "COO"), ("oekonomi", "CFO")):
+            kinds = {g["kind"] for g in goals if g["area"] == a}
+            for kind, label in (("drift", "ingen kortsigtede mål"), ("strategisk", "intet langsigtet mål")):
+                if kind not in kinds:
+                    add(f"goal-missingkind-{a}-{kind}", "vigtig", a, f"{rl} har {label}",
+                        "Indrapporteringen beder automatisk lederen om et forslag.",
+                        f"Aftal {label.split(' ', 1)[1]} med {rl}", "#/goals")
         # Milepæle over frist
         for m in db.execute("""SELECT m.id, m.title, m.due_date, g.id AS goal_id, g.title AS goal_title, g.area
                                FROM goal_milestones m JOIN goals g ON m.goal_id = g.id
                                WHERE NOT m.done AND m.due_date < CURRENT_DATE AND NOT g.archived""").fetchall():
             add(f"ms-overdue-{m['id']}", "vigtig", m["area"], f"Milepælen \u201d{m['title']}\u201d er over frist",
                 f"Del af målet \u201d{m['goal_title']}\u201d. Frist var {m['due_date']}.", "Afslut eller sæt ny frist", f"#/goals/{m['goal_id']}")
+        # Lederenes opgaver: frist snart med lidt fremdrift, ingen status, meldt ikke startet, skubbet
+        for t in self._task_followups(db):
+            for sev, text in t["signals"]:
+                if "over frist" in text or text == "ingen frist":
+                    continue  # dækkes af tjekkene nedenfor
+                who = t["role"] or t["owner"] or "ingen ansvarlig"
+                add(f"task-{t['id']}-{text.split(' ')[0]}", sev, t["area"] or "tvaers", f"{t['title']} ({who}): {text}",
+                    (f"Sidst: {t['last_note']}" if t.get("last_note") else "Der er ikke meldt status endnu."),
+                    f"Bed {who} om status" if t["role"] in ("CCO", "COO", "CFO") else "Følg op på opgaven", "#/todo")
         # Aktioner
         for a in self._action_rows(db, "AND a.status = 'open' AND a.kind = 'aktion'"):
             href = f"#/goals/{a['goal_id']}" if a.get("goal_id") else (f"#/meetings/{a['meeting_id']}" if a.get("meeting_id") else "#/meetings")
@@ -3148,6 +3216,183 @@ class handler(BaseHTTPRequestHandler):
         active.sort(key=lambda x: order[x["severity"]])
         return active, len(out) - len(active)
 
+    ROLE_AREA = {"CCO": "salg", "COO": "leverance", "CFO": "oekonomi", "CEO": "tvaers"}
+
+    def _task_followups(self, db):
+        """Signaler for lederenes åbne opgaver: over frist, frist snart med lidt fremdrift, ingen status længe,
+        meldt 'ikke startet' / 'ved ikke' i seneste indrapportering, og skubbet videre."""
+        today = date.today()
+        # Seneste status fra indrapporteringernes opgaveliste pr. opgave
+        reported = {}
+        for r in db.execute("""SELECT ri.context, ri.answer, rr.submitted_at FROM report_items ri JOIN report_rounds rr ON ri.round_id = rr.id
+                               WHERE ri.kind = 'matrix' AND ri.context->>'target' = 'tasks' AND rr.submitted_at IS NOT NULL AND NOT rr.practice
+                               ORDER BY rr.submitted_at""").fetchall():
+            for k, v in ((r["answer"] or {}).get("rows") or {}).items():
+                if v:
+                    reported[int(k)] = {"status": v, "date": r["submitted_at"].date().isoformat(), "note": ((r["answer"] or {}).get("notes") or {}).get(k)}
+        carried = {}
+        for mt in db.execute("SELECT notes FROM meetings").fetchall():
+            for aid in (mt["notes"] or {}).get("carried") or []:
+                carried[aid] = carried.get(aid, 0) + 1
+        out = []
+        for a in self._action_rows(db, "AND a.status = 'open' AND a.kind = 'aktion'"):
+            owner = (a.get("owner") or "").strip()
+            role = next((r for r in ("CCO", "COO", "CFO", "CEO") if owner.upper().startswith(r)), None)
+            cl = a.get("checklist") or []
+            done_n = sum(1 for c in cl if c.get("done"))
+            due = str(a["due_date"])[:10] if a.get("due_date") else None
+            days_left = (date.fromisoformat(due) - today).days if due else None
+            notes = (a.get("notes") or "").strip().split("\n")
+            last_note_date = notes[-1][:10] if notes and notes[-1][:4].isdigit() else None
+            rep_ = reported.get(a["id"])
+            last_status = max([d for d in (last_note_date, rep_["date"] if rep_ else None) if d], default=None)
+            created = a["created_at"].date() if a.get("created_at") else today
+            days_silent = (today - (date.fromisoformat(last_status) if last_status else created)).days
+            signals = []
+            if days_left is not None and days_left < 0:
+                signals.append(("kritisk", f"{-days_left} dage over frist"))
+            elif days_left is not None and days_left <= 7 and (not cl or done_n / len(cl) < 0.5) and not (rep_ and rep_["status"] == "i_gang" and rep_["date"] >= (today - timedelta(days=7)).isoformat()):
+                signals.append(("vigtig", f"frist om {days_left} dage" + (f", {done_n} af {len(cl)} punkter" if cl else ", ingen status på fremdrift")))
+            if rep_ and rep_["status"] in ("ikke_startet", "ved_ikke") and (days_left is None or days_left <= 14):
+                signals.append(("vigtig", f"meldt '{'ikke startet' if rep_['status'] == 'ikke_startet' else 'ved ikke'}' {rep_['date']}"))
+            if days_silent >= 14:
+                signals.append(("tips" if days_left is None or days_left > 14 else "vigtig", f"ingen status i {days_silent} dage"))
+            if carried.get(a["id"], 0) >= 2:
+                signals.append(("vigtig", f"skubbet videre {carried[a['id']]} gange"))
+            if not due:
+                signals.append(("tips", "ingen frist"))
+            out.append({"id": a["id"], "title": a["title"], "owner": owner or None, "role": role, "area": a.get("area"),
+                        "due_date": due, "days_left": days_left, "checklist": f"{done_n}/{len(cl)}" if cl else None,
+                        "last_report": rep_, "days_silent": days_silent, "signals": signals,
+                        "goal_title": a.get("goal_title"), "last_note": notes[-1] if notes and notes[-1] else None})
+        return out
+
+    def _followup_settings(self, db):
+        cfg = json.loads(self._setting(db, "task_followup", "{}") or "{}")
+        cfg.setdefault("role_users", {})
+        cfg.setdefault("auto", {})
+        return cfg
+
+    def _draft_followup_message(self, db, role, name, tasks, link):
+        """Kort, venlig og konkret besked til lederen om de opgaver, der halter (AI når den er slået til)."""
+        first = (name or role).split(" ")[0]
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            try:
+                system = ("Du skriver på vegne af CEO'en i Systemate en kort, venlig og direkte besked (Slack-stil, 2–5 linjer, ingen emojis ud over evt. én) "
+                          "til en leder om status på deres opgaver. Nævn de konkrete opgaver og hvorfor du spørger (frist, manglende fremdrift, "
+                          "ingen status). Ingen bebrejdelser. Slut med at bede dem melde status via linket, som tilføjes automatisk bagefter. "
+                          "Skriv kun selve beskeden, uden linket.")
+                text, _ = self._claude(system, json.dumps({"leder": first, "rolle": role, "opgaver": [
+                    {"titel": t["title"], "frist": t["due_date"], "tjekliste": t["checklist"], "signaler": [x[1] for x in t["signals"]],
+                     "seneste": t["last_note"]} for t in tasks]}, ensure_ascii=False), effort="low", max_tokens=800)
+                return f"{text.strip()}\n{link}"
+            except Exception as e:
+                print(f"followup draft failed: {e}")
+        lines = [f"Hej {first}", "Jeg vil gerne høre, hvordan det går med:"]
+        for t in tasks[:6]:
+            why = ", ".join(x[1] for x in t["signals"] if x[0] in ("kritisk", "vigtig")) or (f"frist {t['due_date']}" if t["due_date"] else "")
+            lines.append(f"• {t['title']}" + (f" ({why})" if why else ""))
+        lines.append(f"Meld gerne status her, det tager et minut: {link}")
+        return "\n".join(lines)
+
+    def _create_task_status_request(self, db, role, base_url, send_slack=False, auto=False):
+        """Opretter en statusforespørgsel kun om lederens opgaver og en besked til lederen."""
+        import secrets
+        cfg = self._followup_settings(db)
+        uid = cfg["role_users"].get(role)
+        user = db.execute("SELECT id, name, email FROM users WHERE id = %s", (uid,)).fetchone() if uid else None
+        if not user:
+            raise ValueError(f"Vælg hvem der er {role} under Opgaver")
+        area = self.ROLE_AREA[role]
+        tasks = [t for t in self._task_followups(db) if t["role"] == role or (t["owner"] or "").lower().startswith(user["name"].split(" ")[0].lower())]
+        if not tasks:
+            raise ValueError(f"{role} har ingen åbne opgaver")
+        cur = db.execute("""INSERT INTO report_rounds (area, respondent_user_id, respondent_name, token, due_date, status)
+                            VALUES (%s,%s,%s,%s,%s,'open') RETURNING id, token""",
+                         (area, user["id"], user["name"], secrets.token_urlsafe(24), (date.today() + timedelta(days=2)).isoformat()))
+        row = cur.fetchone()
+        self._build_report_items(db, row["id"], area, user["id"], tasks_only=True)
+        link = f"{base_url.rstrip('/')}/r/{row['token']}"
+        flagged = [t for t in tasks if any(sv in ("kritisk", "vigtig") for sv, _ in t["signals"])] or tasks
+        message = self._draft_followup_message(db, role, user["name"], flagged, link)
+        db.execute("UPDATE report_rounds SET message = %s WHERE id = %s", (message, row["id"]))
+        sent = False
+        if send_slack and os.environ.get("SLACK_BOT_TOKEN") and user["email"]:
+            try:
+                self._slack_dm(user["email"], message)
+                db.execute("UPDATE report_rounds SET sent_at = CURRENT_TIMESTAMP WHERE id = %s", (row["id"],))
+                sent = True
+            except Exception as e:
+                print(f"slack failed: {e}")
+        if auto:
+            db.execute("""INSERT INTO notifications (company_id, type, title, message, link) VALUES (NULL, 'report', %s, %s, %s)""",
+                       (f"AI har fulgt op på {role}s opgaver" if sent else f"Statusforespørgsel til {role} er klar",
+                        (f"Sendt i Slack til {user['name']} om {len(flagged)} opgave{'' if len(flagged) == 1 else 'r'}." if sent
+                         else f"{len(flagged)} opgave{' halter' if len(flagged) == 1 else 'r halter'}. Beskeden er klar under Opgaver: kopiér den og send den til {user['name']}."),
+                        "#/todo"))
+        db.commit()
+        return {"round_id": row["id"], "token": row["token"], "link": link, "message": message, "sent": sent,
+                "respondent": user["name"], "tasks": [t["title"] for t in flagged]}
+
+    def _handle_task_followup(self, db, method, path, body):
+        base = f"https://{self.headers.get('X-Forwarded-Host') or self.headers.get('Host')}"
+        if path == "/api/ceo/followup-settings":
+            cfg = self._followup_settings(db)
+            if method == "PUT":
+                for key in ("role_users", "auto", "base_url"):
+                    if key in body:
+                        cfg[key] = body[key]
+                db.execute("""INSERT INTO app_settings (key, value, updated_at) VALUES ('task_followup', %s, CURRENT_TIMESTAMP)
+                              ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP""", (json.dumps(cfg),))
+                db.commit()
+            tf = self._task_followups(db)
+            summary = {r: {"open": sum(1 for t in tf if t["role"] == r),
+                           "flagged": sum(1 for t in tf if t["role"] == r and any(sv in ("kritisk", "vigtig") for sv, _ in t["signals"])),
+                           "last_request": (lambda x: x["created_at"].date().isoformat() if x else None)(db.execute(
+                               """SELECT created_at FROM report_rounds WHERE respondent_user_id = %s AND area = %s
+                                  ORDER BY created_at DESC LIMIT 1""", (cfg["role_users"].get(r), self.ROLE_AREA[r])).fetchone()),
+                           # Forespørgsel der er lavet (fx automatisk) men ikke sendt endnu
+                           "pending": (lambda x: dict(x) if x else None)(db.execute(
+                               """SELECT id AS round_id, token, message, respondent_name AS respondent FROM report_rounds
+                                  WHERE respondent_user_id = %s AND area = %s AND status = 'open' AND sent_at IS NULL AND message IS NOT NULL
+                                  ORDER BY created_at DESC LIMIT 1""", (cfg["role_users"].get(r), self.ROLE_AREA[r])).fetchone())}
+                       for r in ("CCO", "COO", "CFO")}
+            self._json_response({**cfg, "summary": summary, "signals": {t["id"]: t["signals"] for t in tf},
+                                 "slack": bool(os.environ.get("SLACK_BOT_TOKEN")),
+                                 "ai": bool(os.environ.get("ANTHROPIC_API_KEY"))})
+        elif path == "/api/ceo/followup" and method == "POST":
+            try:
+                res = self._create_task_status_request(db, body.get("role"), body.get("origin") or base, send_slack=bool(body.get("send_slack")))
+            except ValueError as e:
+                db.rollback(); self._error(400, str(e)); return True
+            self._json_response(res, 201)
+        elif path == "/api/cron/task-followup":
+            # Køres af Vercel Cron hver hverdagsmorgen. Følger kun op for roller, hvor CEO'en har slået automatisk opfølgning til.
+            secret = os.environ.get("CRON_SECRET")
+            if secret and self.headers.get("Authorization") != f"Bearer {secret}":
+                self._error(401, "Ikke tilladt"); return True
+            cfg = self._followup_settings(db)
+            # Linket skal pege på den adresse, CEO'en selv bruger (gemt fra browseren), ikke på cron-kaldets interne adresse
+            base_url = os.environ.get("PUBLIC_BASE_URL") or cfg.get("base_url") or base
+            done = []
+            for role, on in cfg["auto"].items():
+                if not on or not cfg["role_users"].get(role):
+                    continue
+                recent = db.execute("""SELECT 1 FROM report_rounds WHERE respondent_user_id = %s AND area = %s
+                                       AND created_at >= NOW() - INTERVAL '3 days'""", (cfg["role_users"][role], self.ROLE_AREA[role])).fetchone()
+                flagged = [t for t in self._task_followups(db) if t["role"] == role and any(sv in ("kritisk", "vigtig") for sv, _ in t["signals"])]
+                if recent or not flagged:
+                    continue
+                try:
+                    r = self._create_task_status_request(db, role, base_url, send_slack=True, auto=True)
+                    done.append({"role": role, "sent": r["sent"], "tasks": len(r["tasks"])})
+                except ValueError:
+                    db.rollback()
+            self._json_response({"followed_up": done})
+        else:
+            self._error(404, "Endpoint not found")
+        return True
+
     def _leadership_mirror(self, db):
         """Lederspejl: hvordan CEO'en faktisk leder ud fra møder, aktioner, mål og indrapporteringer."""
         today = date.today()
@@ -3195,6 +3440,25 @@ class handler(BaseHTTPRequestHandler):
         m["goals_updated_30"] = sum(1 for g in goals if g.get("last_checkin") and str(g["last_checkin"]) >= d30)
         m["strategic_unmoved"] = [g["title"] for g in goals if g["kind"] == "strategisk" and not g.get("last_checkin")
                                   and (g.get("current_value") in (None, g.get("start_value")))]
+        # Mål pr. leder: kortsigtede og langsigtede, hvor konkrete, og om de bliver fulgt op
+        leaders = {}
+        for a in areas:
+            gl = [g for g in goals if g["area"] == a]
+            last = max((str(g["last_checkin"]) for g in gl if g.get("last_checkin")), default=None)
+            leaders[a] = {"role": role[a], "drift": sum(1 for g in gl if g["kind"] == "drift"),
+                          "strategisk": sum(1 for g in gl if g["kind"] == "strategisk"),
+                          "quality": round(sum(g["quality"] for g in gl) / len(gl)) if gl else None,
+                          "unclear": [{"title": g["title"], "missing": g["quality_missing"]} for g in gl if g["quality"] < 60],
+                          "last_update": last,
+                          "stale": sum(1 for g in gl if not g.get("last_checkin") or str(g["last_checkin"]) < d30)}
+        tf = self._task_followups(db)
+        for a, L in leaders.items():
+            mine = [t for t in tf if t["role"] == L["role"]]
+            L["tasks_open"] = len(mine)
+            L["tasks_overdue"] = sum(1 for t in mine if t["days_left"] is not None and t["days_left"] < 0)
+            L["tasks_flagged"] = sum(1 for t in mine if any(sv in ("kritisk", "vigtig") for sv, _ in t["signals"]))
+        m["leaders"] = leaders
+
         # Opmærksomhed pr. område (møder, statusopdateringer og aktioner de sidste 30 dage)
         att = {}
         for a in areas:
@@ -3242,6 +3506,25 @@ class handler(BaseHTTPRequestHandler):
               "Du sætter standarden for, hvordan der følges op. " + "; ".join(m["ceo_actions_overdue_titles"]))
         elif m["actions_90"] >= 5 and not m["ceo_actions_open"] and not any((a.get("owner") or "").upper().startswith("CEO") for a in acts):
             o("refleksion", "Du har ingen aktioner selv", "Alt er uddelegeret. Hvad er det, kun du kan gøre for at flytte målene?")
+        for a, L in m["leaders"].items():
+            if not L["drift"] and not L["strategisk"]:
+                o("udfordring", f"{L['role']} har ingen mål", f"Uden mål for {areas[a].lower()} kan du ikke holde {L['role']} op på noget konkret. Aftal 2–3 kortsigtede og ét langsigtet mål.", "#/goals")
+                continue
+            if not L["drift"]:
+                o("udfordring", f"{L['role']} har ingen kortsigtede mål", "Kortsigtede driftsmål (de næste 3–12 måneder) gør det muligt at se, om I er på sporet nu.", "#/goals")
+            if not L["strategisk"]:
+                o("udfordring", f"{L['role']} har intet langsigtet mål", f"Hvor skal {areas[a].lower()} være om 2–3 år? Uden et strategisk mål handler møderne kun om drift.", "#/goals")
+            if L["quality"] is not None and L["quality"] < 60:
+                mangler = sorted({x for u in L["unclear"] for x in u["missing"]})
+                o("udfordring", f"{L['role']}'s mål er ikke konkrete nok ({L['quality']} %)",
+                  "Der mangler bl.a. " + ", ".join(mangler[:4]) + ". Uklare mål giver uklar opfølgning.", "#/goals")
+            if L["stale"] and L["stale"] * 2 >= L["drift"] + L["strategisk"]:  # mindst halvdelen er ikke fulgt op
+                o("refleksion", f"{L['role']}'s mål bliver ikke fulgt op", f"{L['stale']} af {L['drift'] + L['strategisk']} mål er ikke opdateret de sidste 30 dage." + (f" Sidst opdateret {L['last_update']}." if L["last_update"] else ""), "#/goals")
+            if L.get("tasks_overdue"):
+                o("udfordring", f"{L['role']} har {L['tasks_overdue']} opgave{'r' if L['tasks_overdue'] > 1 else ''} over frist",
+                  "Bed om status, og aftal en ny realistisk frist eller hjælp, så opgaven ikke bliver ved med at glide.", "#/todo")
+            if L["quality"] is not None and L["quality"] >= 80 and not L["stale"]:
+                o("styrke", f"{L['role']}'s mål er konkrete og fulgt op", f"Gennemsnitlig målkvalitet {L['quality']} %.")
         if m["goals"] and m["goals_updated_30"] / m["goals"] < 0.5:
             o("udfordring", f"Kun {m['goals_updated_30']} af {m['goals']} mål er opdateret de sidste 30 dage",
               "Mål, der ikke bliver fulgt op, bliver til ønsker. Brug ledermøderne til at opdatere dem.", "#/goals")
@@ -3272,8 +3555,10 @@ class handler(BaseHTTPRequestHandler):
                   "nu": g.get("current_value"), "mål": g.get("target_value"), "enhed": g.get("unit"), "deadline": g.get("due_date"),
                   "sidst_opdateret": g.get("last_checkin"), "milepæle": f"{g.get('milestones_done')}/{g.get('milestones_total')}"}
                  for g in self._goal_rows(db, "AND NOT g.archived")]
-        actions = [{"titel": a["title"], "område": a["area"], "ansvarlig": a.get("owner"), "frist": a.get("due_date")}
-                   for a in self._action_rows(db, "AND a.status = 'open'")]
+        actions = [{"titel": t["title"], "område": t["area"], "ansvarlig": t["owner"], "frist": t["due_date"],
+                    "dage_til_frist": t["days_left"], "tjekliste": t["checklist"], "dage_uden_status": t["days_silent"],
+                    "seneste_melding": t["last_report"], "seneste_note": t["last_note"], "signaler": [x[1] for x in t["signals"]]}
+                   for t in self._task_followups(db)]
         meetings = [dict(r) for r in db.execute("""SELECT area, title, meeting_date, status FROM meetings
                                                    ORDER BY meeting_date DESC LIMIT 12""").fetchall()]
         tenders = [dict(r) for r in db.execute("""SELECT co.name AS kunde, t.title, t.status, t.deadline, t.estimated_value, t.purchase_route
@@ -3383,7 +3668,7 @@ class handler(BaseHTTPRequestHandler):
         score += 1 if not ctx.get("last_contact") else 0
         return score
 
-    def _build_report_items(self, db, round_id, area, respondent_user_id=None, company_ids=None, only_customers=False):
+    def _build_report_items(self, db, round_id, area, respondent_user_id=None, company_ids=None, only_customers=False, tasks_only=False):
         """Laver indrapporteringen ud fra data. Bedste svarform først: hurtige klik-lister til det, alle kunder skal svare på,
         grundige spørgsmål kun til de vigtigste kunder, og emner der blev udskudt sidst kommer med igen."""
         items = []
@@ -3400,7 +3685,9 @@ class handler(BaseHTTPRequestHandler):
         carried_companies = {i[3] for i in items if i[3]}
 
         customers = []
-        if area in ("salg", "leverance"):
+        if tasks_only:
+            area = area  # kun opgavelisten nedenfor
+        if area in ("salg", "leverance") and not tasks_only:
             if area == "salg":
                 companies = db.execute("""
                     SELECT DISTINCT co.id, co.name, co.sales_stage, co.sales_type, co.sales_phase FROM companies co
@@ -3452,7 +3739,7 @@ class handler(BaseHTTPRequestHandler):
                 ctx["priority"] = self._customer_priority(ctx)
                 customers.append((co, ctx))
 
-        if area == "salg" and customers:
+        if area == "salg" and customers and not tasks_only:
             def hint(ctx):
                 parts = []
                 for t in ctx["tenders"][:1]:
@@ -3487,11 +3774,42 @@ class handler(BaseHTTPRequestHandler):
             for co, ctx in customers:
                 if co["id"] not in carried_companies:
                     items.append(("customer", "company", co["id"], co["id"], co["name"], ctx))
-        for g in ([] if only_customers else self._goal_rows(db, "AND NOT g.archived AND g.area = %s", (area,))):
+        role = {"salg": "CCO", "leverance": "COO", "oekonomi": "CFO"}.get(area, "CEO")
+        if not only_customers:
+            # Lederens egne åbne opgaver som klik-liste (fx lønsamtaler), så CEO'en ved om de bliver gjort
+            resp = db.execute("SELECT name FROM users WHERE id = %s", (respondent_user_id,)).fetchone() if respondent_user_id else None
+            first = (resp["name"].split(" ")[0] if resp else None)
+            tasks_open = self._action_rows(db, "AND a.status = 'open' AND a.kind = 'aktion' AND (a.owner ILIKE %s OR a.owner ILIKE %s)",
+                                           (role + "%", (first or "§") + "%"))
+            if tasks_open:
+                items.append(("matrix", None, None, None, "Dine opgaver: hvordan står det til?",
+                              {"target": "tasks", "input": "choice",
+                               "options": [["done", "Udført"], ["i_gang", "I gang"], ["ikke_startet", "Ikke startet"], ["ved_ikke", "Ved ikke"]],
+                               "hint": "Udførte opgaver bliver lukket. Er en opgave ikke udført, så skriv kort hvad der mangler.",
+                               "rows": [{"company_id": t["id"], "name": t["title"],
+                                         "hint": " · ".join(x for x in [f"frist {str(t['due_date'])[:10]}" if t.get("due_date") else "",
+                                                                         "over frist" if t.get("due_date") and str(t["due_date"])[:10] < date.today().isoformat() else "",
+                                                                         (f"{sum(1 for c in (t.get('checklist') or []) if c.get('done'))}/{len(t.get('checklist') or [])} punkter" if t.get("checklist") else "")] if x),
+                                         "current": None} for t in tasks_open]}))
+        area_goals = [] if (only_customers or tasks_only) else self._goal_rows(db, "AND NOT g.archived AND g.area = %s AND g.status != 'done'", (area,))
+        for g in sorted(area_goals, key=lambda g: 0 if g["kind"] == "drift" else 1):
             ctx = {k: g.get(k) for k in ("kind", "unit", "start_value", "target_value", "current_value", "due_date",
-                                          "status", "last_checkin", "last_comment", "milestones_total", "milestones_done", "start_date")}
+                                          "status", "last_checkin", "last_comment", "milestones_total", "milestones_done", "start_date",
+                                          "description", "quality_missing")}
             items.append(("goal", "goal", g["id"], g.get("company_id"), g["title"], ctx))
-        for kind, title, ctx in ([] if only_customers else REPORT_QUESTIONS.get(area, [])):
+        if not only_customers and not tasks_only and area in ("salg", "leverance", "oekonomi"):
+            kinds = {g["kind"] for g in area_goals}
+            if "drift" not in kinds:
+                items.append(("question", None, None, None, "Dine kortsigtede mål",
+                              {"hint": "Du har ingen kortsigtede mål registreret. Hvad er dine 2–3 vigtigste mål for de næste 3–12 måneder, og hvordan måler vi dem (tal og dato)?"}))
+            if "strategisk" not in kinds:
+                items.append(("question", None, None, None, "Dit langsigtede mål",
+                              {"hint": "Du har intet langsigtet mål registreret. Hvor skal dit område være om 2–3 år, og hvad er de første milepæle?"}))
+            # Tværgående strategiske mål: hvad bidrager lederen med?
+            for g in self._goal_rows(db, "AND NOT g.archived AND g.area = 'tvaers' AND g.status != 'done'"):
+                items.append(("question", "goal", g["id"], None, f"Tværgående mål: {g['title']}",
+                              {"hint": f"Hvad har du gjort for at flytte \u201d{g['title']}\u201d siden sidst, og hvad er dit næste bidrag?", "cross_goal": True}))
+        for kind, title, ctx in ([] if (only_customers or tasks_only) else REPORT_QUESTIONS.get(area, [])):
             items.append((kind, None, None, None, title, ctx))
         for i, (kind, ref_type, ref_id, company_id, title, ctx) in enumerate(items):
             db.execute("""INSERT INTO report_items (round_id, kind, ref_type, ref_id, company_id, title, context, sort_order)
@@ -3531,6 +3849,13 @@ class handler(BaseHTTPRequestHandler):
                     names = [r["name"] for r in rows if vals.get(str(r["company_id"])) == key]
                     if names:
                         flags.append(f"Meldt {label}: " + ", ".join(names) + ". Se forslag til oprydning.")
+            if ctx.get("target") == "tasks":
+                notdone = [r["name"] for r in rows if vals.get(str(r["company_id"])) in ("ikke_startet", "ved_ikke")]
+                if notdone:
+                    flags.append("Ikke startet eller uklart: " + ", ".join(notdone[:5]))
+                over = [r["name"] for r in rows if "over frist" in (r.get("hint") or "") and vals.get(str(r["company_id"])) != "done"]
+                if over:
+                    flags.append("Over frist og ikke udført: " + ", ".join(over[:5]))
             if ctx.get("target") == "news":
                 yes = [r["name"] for r in rows if vals.get(str(r["company_id"])) == "ja" and not (a.get("notes") or {}).get(str(r["company_id"]))]
                 if yes:
@@ -3756,6 +4081,15 @@ class handler(BaseHTTPRequestHandler):
                     elif ctx.get("target") == "sales_phase" and val != "ved_ikke":
                         db.execute("""UPDATE companies SET sales_phase = %s, sales_phase_updated = CURRENT_DATE,
                                       sales_stage = COALESCE(%s, sales_stage) WHERE id = %s""", (val, PHASE_TO_STAGE.get(val), int(cid)))
+                    elif ctx.get("target") == "tasks":
+                        note = (a.get("notes") or {}).get(cid)
+                        label = dict(ctx.get("options") or []).get(val, val)
+                        line = f"{date.today().isoformat()} {who}: {label}" + (f". {note}" if note else "")
+                        if val == "done":
+                            db.execute("""UPDATE meeting_actions SET status = 'done', done_at = CURRENT_TIMESTAMP,
+                                          notes = COALESCE(notes || E'\n', '') || %s WHERE id = %s AND status = 'open'""", (line, int(cid)))
+                        else:
+                            db.execute("UPDATE meeting_actions SET notes = COALESCE(notes || E'\n', '') || %s WHERE id = %s", (line, int(cid)))
                     elif ctx.get("target") == "news" and val == "ja" and (a.get("notes") or {}).get(cid):
                         db.execute("INSERT INTO company_notes (company_id, user_name, content) VALUES (%s,%s,%s)",
                                    (int(cid), who, "Indrapporteret: " + a["notes"][cid]))
@@ -3869,6 +4203,9 @@ class handler(BaseHTTPRequestHandler):
             "- why: én sætning om hvorfor emnet er vigtigt nu (eller tom streng).\n"
             "- ask_status: true hvis en samlet vurdering (på sporet / risiko / kritisk) giver mening.\n"
             "- title: kort, fx 'EWII · Flow til EWII (3 mio. kr.)'.\n"
+            "For mål: driftsmål (kortsigtede) handler om tal, fremdrift mod plan og hvad der skal til for at nå dem; "
+            "strategiske mål (langsigtede) handler om næste milepæl, hvad der konkret er gjort siden sidst, og hvad der blokerer. "
+            "Er målet uklart (se quality_missing), så spørg ind til det, der mangler (fx måltal eller dato).\n"
             "Lav præcis ét emne pr. input-emne med samme subject_index.\n\n"
             + ANSWER_FORMAT_RULES)
         schema = {"type": "object", "additionalProperties": False, "required": ["topics"], "properties": {"topics": {
@@ -4164,7 +4501,11 @@ class handler(BaseHTTPRequestHandler):
                                 it["title"], json.dumps(it.get("context") or {}), i))
             else:
                 self._build_report_items(db, new_id, body["area"], user["id"],
-                                         company_ids=body.get("company_ids") or None, only_customers=bool(body.get("only_customers")))
+                                         company_ids=body.get("company_ids") or None, only_customers=bool(body.get("only_customers")),
+                                         tasks_only=bool(body.get("tasks_only")))
+                if body.get("tasks_only") and not db.execute("SELECT 1 FROM report_items WHERE round_id = %s", (new_id,)).fetchone():
+                    db.rollback()
+                    self._error(400, "Der er ingen åbne opgaver til denne leder"); return True
             db.commit()
             log_audit(db, uid, "create", "report_round", new_id, f"{body['area']} · {user['name']}")
             db.commit()
@@ -4235,7 +4576,7 @@ class handler(BaseHTTPRequestHandler):
             if not rnd.get("respondent_email"):
                 self._error(400, "Modtageren har ingen e-mail i Brugere"); return True
             due = f" senest {rnd['due_date']}" if rnd.get("due_date") else ""
-            text = (f"Hej {rnd['respondent_name'].split(' ')[0]} \U0001F44B\nDer er indrapportering til næste opfølgningsmøde{due}. "
+            text = body.get("text") or (f"Hej {rnd['respondent_name'].split(' ')[0]} \U0001F44B\nDer er indrapportering til næste opfølgningsmøde{due}. "
                     f"Det tager ca. 10 minutter, og dine sidste svar er udfyldt på forhånd:\n{body.get('link')}")
             try:
                 self._slack_dm(rnd["respondent_email"], text)

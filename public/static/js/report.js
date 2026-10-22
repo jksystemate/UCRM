@@ -287,15 +287,15 @@ function matrixCard(it) {
                     ...c.options.map(([k, l]) => h('option', { value: k, ...(val === k ? { selected: true } : {}) }, l)));
                 control.addEventListener('change', () => { setRow(r.company_id, control.value); control.classList.toggle('set', !!control.value); });
             } else {
-                control = chips(c.options.map(([k, l]) => [k, l, k === 'ved_ikke' ? 'warn' : '']), val, k => { setRow(r.company_id, k); if (c.target === 'news') draw(); });
+                control = chips(c.options.map(([k, l]) => [k, l, k === 'ved_ikke' || k === 'ikke_startet' ? 'warn' : k === 'done' ? 'good' : '']), val, k => { setRow(r.company_id, k); if (c.target === 'news' || c.target === 'tasks') draw(); });
             }
             const row = h('div', { className: 'mx-row' },
                 h('div', { className: 'mx-name' }, h('b', {}, r.name), r.hint ? h('small', {}, r.hint) : null,
                     r.current && c.target === 'sales_phase' ? h('small', { className: 'mx-cur' }, `Sidst: ${(c.options.find(o => o[0] === r.current) || [])[1] || r.current}`) : null),
                 control);
             list.appendChild(row);
-            if (c.target === 'news' && val === 'ja') {
-                const t = h('input', { type: 'text', placeholder: `Hvad er sket hos ${r.name}?`, className: 'mx-note' });
+            if ((c.target === 'news' && val === 'ja') || (c.target === 'tasks' && val && val !== 'done')) {
+                const t = h('input', { type: 'text', placeholder: c.target === 'tasks' ? 'Hvad mangler, og hvornår er det færdigt?' : `Hvad er sket hos ${r.name}?`, className: 'mx-note' });
                 t.value = (a().notes || {})[r.company_id] || '';
                 t.addEventListener('input', () => { it.answer = { ...a(), notes: { ...(a().notes || {}), [r.company_id]: t.value } }; save(it); });
                 list.appendChild(t);

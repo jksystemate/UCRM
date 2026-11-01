@@ -4334,10 +4334,62 @@ const GOAL_STATUS = {
 };
 const STALE_DAYS = 30; // et mål uden statusopdatering i så mange dage markeres som "ikke fulgt op"
 
-function todayIso() { return new Date().toISOString().split('T')[0]; }
+// Lokal dato som ÅÅÅÅ-MM-DD (toISOString giver UTC og rammer dagen før om natten i dansk tid)
+const localIso = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+function todayIso() { return localIso(new Date()); }
 function addDaysIso(days, from = todayIso()) {
     const d = new Date(from + 'T00:00:00'); d.setDate(d.getDate() + days);
-    return d.toISOString().split('T')[0];
+    return localIso(d);
+}
+// Falder datoen på en lørdag eller søndag, flyttes den til mandag
+function workdayIso(iso) {
+    const wd = new Date(iso + 'T00:00:00').getDay();
+    return wd === 6 ? addDaysIso(2, iso) : wd === 0 ? addDaysIso(1, iso) : iso;
+}
+// Dansk kalender i et vindue: klik på en dag (ugen starter mandag). Giver ÅÅÅÅ-MM-DD eller null, hvis man lukker.
+function pickDate(title, initial = todayIso(), okLabel = 'Vælg') {
+    return new Promise(resolve => {
+        const MONTHS = ['januar', 'februar', 'marts', 'april', 'maj', 'juni', 'juli', 'august', 'september', 'oktober', 'november', 'december'];
+        const DAYS = ['ma', 'ti', 'on', 'to', 'fr', 'lø', 'sø'];
+        const longDate = iso => new Date(iso + 'T00:00:00').toLocaleDateString('da-DK', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+        let chosen = initial, view = new Date(initial.slice(0, 7) + '-01T00:00:00'), done = false;
+        const finish = v => { if (done) return; done = true; closeModal(); resolve(v); };
+        const head = h('div', { className: 'cal-head' }), grid = h('div', { className: 'cal-grid' });
+        const picked = h('div', { className: 'cal-picked' });
+        const okBtn = h('button', { className: 'act-btn primary', onClick: () => finish(chosen) }, okLabel);
+        const draw = () => {
+            head.innerHTML = '';
+            head.append(
+                h('button', { type: 'button', className: 'cal-nav', title: 'Forrige måned', onClick: () => { view.setMonth(view.getMonth() - 1); draw(); } }, '‹'),
+                h('b', {}, `${MONTHS[view.getMonth()]} ${view.getFullYear()}`),
+                h('button', { type: 'button', className: 'cal-nav', title: 'Næste måned', onClick: () => { view.setMonth(view.getMonth() + 1); draw(); } }, '›'));
+            grid.innerHTML = '';
+            DAYS.forEach(d => grid.appendChild(h('span', { className: 'cal-dow' }, d)));
+            const first = (view.getDay() + 6) % 7;
+            for (let i = 0; i < first; i++) grid.appendChild(h('span', {}));
+            const n = new Date(view.getFullYear(), view.getMonth() + 1, 0).getDate();
+            for (let day = 1; day <= n; day++) {
+                const iso = `${view.getFullYear()}-${String(view.getMonth() + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+                const wd = (first + day - 1) % 7;
+                grid.appendChild(h('button', { type: 'button',
+                    className: `cal-day${iso === chosen ? ' on' : ''}${iso === todayIso() ? ' today' : ''}${wd >= 5 ? ' weekend' : ''}`,
+                    ...(iso < todayIso() ? { disabled: '' } : {}),
+                    onClick: () => { chosen = iso; draw(); }, onDblclick: () => finish(iso) }, String(day)));
+            }
+            picked.textContent = longDate(chosen);
+        };
+        const quick = [['I morgen', 1], ['Om 1 uge', 7], ['Om 2 uger', 14], ['Om 1 måned', 30]].map(([l, d]) =>
+            h('button', { type: 'button', className: 'as-chip', onClick: () => { chosen = workdayIso(addDaysIso(d)); view = new Date(chosen.slice(0, 7) + '-01T00:00:00'); draw(); } }, l));
+        draw();
+        showModal(title, h('div', { className: 'cal' },
+            h('div', { className: 'flex flex-wrap gap-1 mb-3' }, ...quick),
+            head, grid, picked,
+            h('div', { className: 'flex justify-end gap-2 mt-4' }, h('button', { className: 'act-btn', onClick: () => finish(null) }, 'Annullér'), okBtn)), 'max-w-sm');
+        // Lukker man vinduet med × eller ved at klikke udenfor, er svaret "intet valgt"
+        const overlay = document.getElementById('modal-overlay');
+        const obs = new MutationObserver(() => { if (overlay.classList.contains('hidden')) { obs.disconnect(); finish(null); } });
+        obs.observe(overlay, { attributes: true, attributeFilter: ['class'] });
+    });
 }
 function daysBetween(a, b) { return Math.round((new Date(b + 'T00:00:00') - new Date(String(a).slice(0, 10) + 'T00:00:00')) / 86400000); }
 function fmtNum(n) {
@@ -4750,7 +4802,8 @@ function actionRow(a, { meetingId = null, onChange, showCarry = false, carried =
                 ? h('span', { className: 'text-xs text-gray-500' }, '↻ Fortsætter')
                 : h('button', { className: 'act-btn', onClick: onCarry }, 'Fortsætter')) : null,
             showCarry && a.status === 'open' ? h('button', { className: 'act-btn', onClick: async () => {
-                const d = prompt('Ny frist (ÅÅÅÅ-MM-DD):', a.due_date || addDaysIso(14));
+                const cur = (a.due_date || '').slice(0, 10);
+                const d = await pickDate(`Ny frist: ${a.title}`, cur > todayIso() ? cur : workdayIso(addDaysIso(14)), 'Sæt frist');
                 if (d) { await api.updateAction(a.id, { due_date: d }); if (onCarry) onCarry(); else if (onChange) onChange(); }
             } }, 'Ny frist') : null,
             h('button', { className: `act-btn ${a.status === 'done' ? '' : 'primary'}`, onClick: async () => {
@@ -4804,7 +4857,7 @@ async function renderMeetings(container) {
                     location.hash = `#/meetings/${m.id}`;
                 } }, 'Start møde nu'),
             !planned ? h('button', { className: 'meet-btn', onClick: async () => {
-                const d = prompt('Dato for mødet (ÅÅÅÅ-MM-DD):', addDaysIso(7));
+                const d = await pickDate(`Planlæg møde: ${MEETING_TITLES[area]}`, workdayIso(addDaysIso(7)), 'Planlæg møde');
                 if (!d) return;
                 await api.createMeeting({ area, title: MEETING_TITLES[area], meeting_date: d,
                     participants: area === 'tvaers' ? 'CEO, CCO, COO, CFO' : `CEO, ${AREA_ROLE[area]}` });

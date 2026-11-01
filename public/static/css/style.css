@@ -953,3 +953,18 @@ th.cursor-pointer:hover { color: #374151; }
 .sig-vigtig { background: var(--warn-soft); color: var(--warn); }
 .sig-tips { background: var(--surface2); color: var(--muted); border: 1px solid var(--border); }
 .fu-pending { margin: 4px 0 8px; padding: 6px 8px; border-radius: 8px; background: var(--warn-soft); color: var(--warn); font-size: 12.5px; font-weight: 600; display: flex; align-items: center; justify-content: space-between; }
+
+/* Kalender (pickDate) */
+.cal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; text-transform: capitalize; }
+.cal-nav { width: 34px; height: 34px; border-radius: 8px; border: 1px solid #d9e2e9; background: #fff; font-size: 20px; line-height: 1; color: #194b66; }
+.cal-nav:hover { background: #f4f7fa; }
+.cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+.cal-dow { text-align: center; font-size: 11px; font-weight: 700; text-transform: uppercase; color: #788a96; padding: 4px 0; }
+.cal-day { height: 38px; border-radius: 8px; border: 1px solid transparent; background: #fff; font-size: 14px; color: #12222d; }
+.cal-day:hover:not(:disabled) { background: #dcebf6; }
+.cal-day.weekend { color: #788a96; }
+.cal-day.today { border-color: #c3a95c; font-weight: 700; }
+.cal-day.on { background: #194b66; border-color: #194b66; color: #fff; font-weight: 700; }
+.cal-day:disabled { color: #c9d3da; cursor: default; }
+.cal-picked { margin-top: 10px; text-align: center; font-weight: 600; color: #194b66; }
+.cal-picked::first-letter { text-transform: uppercase; }

@@ -26,6 +26,8 @@ function h(tag, attrs = {}, ...children) {
     for (const c of children.flat()) if (c != null) el.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
     return el;
 }
+// Som el.append, men springer tomme (null) elementer over, så der ikke står "null" på siden
+const append = (el, ...kids) => el.append(...kids.filter(k => k != null));
 const fmtDate = d => d ? new Date(String(d).slice(0, 10) + 'T00:00:00').toLocaleDateString('da-DK', { day: 'numeric', month: 'short', year: 'numeric' }) : '';
 const fmtNum = n => n == null || n === '' ? '–' : Number(n).toLocaleString('da-DK', { maximumFractionDigits: 1 });
 const today = new Date().toISOString().slice(0, 10);
@@ -66,6 +68,11 @@ function isComplete(it) {
     if (it.kind === 'customer') return !!(a.not_relevant || (a.status && (a.next_step || ['vundet', 'tabt', 'leveret'].includes(a.status))));
     if (it.kind === 'marketing') return !!a.activities;
     if (it.kind === 'goal') return !!a.status && (!['at_risk', 'off_track'].includes(a.status) || !!a.comment);
+    if (it.kind === 'breakdown') {
+        const rows = (a.rows || []).filter(r => (r.title || '').trim());
+        return rows.length >= 2 && rows.every(r => r.due_date && (it.context?.target_value == null || (r.value !== '' && r.value != null)))
+            && !!(a.drivers || '').trim();
+    }
     if (it.kind === 'topic') {
         const c = it.context || {};
         const fu = a.followup || {};
@@ -125,7 +132,7 @@ function customerCard(it) {
         nr.addEventListener('change', () => { it.answer = { ...(it.answer || {}), not_relevant: nr.checked }; save(it); draw(); });
         const delivery = round.area === 'leverance';
         if (!a.not_relevant) {
-            body.append(
+            append(body, 
                 field(delivery ? 'Status på leverancen' : 'Status', chips(delivery ? DELIVERY_STATUS : CUSTOMER_STATUS, a.status, k => { it.answer = { ...(it.answer || {}), status: k }; save(it); })),
                 field('Hvad er sket siden sidst?', text(it, 'since_last', 'Møder, svar fra kunden, nye oplysninger…')),
                 h('div', { className: 'row2b' },
@@ -155,7 +162,7 @@ function goalCard(it) {
     const body = h('div', { className: 'body' });
     const commentLabel = h('label', { className: 'l' }, 'Kommentar');
     const a = it.answer || {};
-    body.append(
+    append(body, 
         hasTarget ? field(`Ny værdi${c.unit ? ` (${c.unit})` : ''}`, input(it, 'value', 'number', String(c.current_value ?? ''))) : null,
         field('Status', chips(GOAL_STATUS, a.status, k => {
             it.answer = { ...(it.answer || {}), status: k };
@@ -171,6 +178,50 @@ function goalCard(it) {
             c.milestones_total ? h('div', {}, `Milepæle: ${c.milestones_done} af ${c.milestones_total} nået`) : null),
         c.last_comment ? h('div', { className: 'prev' }, `Sidst: "${c.last_comment}"`) : null,
         body);
+}
+
+// Lederen nedbryder selv målet i milepæle. Forslaget er udfyldt på forhånd, så det typisk kun skal justeres.
+function breakdownCard(it) {
+    const c = it.context || {};
+    const hasTarget = c.target_value != null;
+    if (!it.answer?.rows) it.answer = { ...(it.answer || {}), rows: (c.suggested || []).map(r => ({ ...r })),
+                                        ...(c.previous_drivers && !it.answer?.drivers ? { drivers: c.previous_drivers } : {}) };
+    const list = h('div', { className: `bd-rows ${hasTarget ? '' : 'nt'}` });
+    const warn = h('div', { className: 'err' });
+    const check = () => {
+        const last = it.answer.rows.filter(r => r.value !== '' && r.value != null).pop();
+        warn.textContent = hasTarget && last && Number(last.value) < Number(c.target_value) ? `Sidste milepæl når ikke målet på ${fmtNum(c.target_value)}.` : '';
+    };
+    const draw = () => {
+        list.innerHTML = '';
+        list.appendChild(h('div', { className: 'bd-row bd-head' }, h('span', {}, 'Milepæl'), h('span', {}, 'Dato'),
+            hasTarget ? h('span', {}, `Akkumuleret${c.unit ? ` (${c.unit})` : ''}`) : null, h('span', {})));
+        it.answer.rows.forEach((r, i) => {
+            const set = (k, v) => { r[k] = v; save(it); refresh(); check(); };
+            const t = h('input', { type: 'text', value: r.title || '', placeholder: 'fx Q1 2027' }); t.addEventListener('input', () => set('title', t.value));
+            const d = h('input', { type: 'date', value: (r.due_date || '').slice(0, 10) }); d.addEventListener('input', () => set('due_date', d.value));
+            const v = hasTarget ? h('input', { type: 'number', value: r.value ?? '', placeholder: '0' }) : null;
+            if (v) v.addEventListener('input', () => set('value', v.value));
+            list.appendChild(h('div', { className: 'bd-row' }, t, d, v,
+                h('button', { type: 'button', className: 'bd-x', title: 'Fjern', onClick: () => { it.answer.rows.splice(i, 1); save(it); draw(); refresh(); check(); } }, '×')));
+        });
+        list.appendChild(h('button', { type: 'button', className: 'ghost', style: 'margin-top:8px', onClick: () => {
+            it.answer.rows.push({ title: '', due_date: '', value: '' }); draw();
+        } }, '+ Tilføj milepæl'));
+    };
+    draw(); check();
+    return h('div', { className: 'card' },
+        h('div', { className: 'card-h' }, h('span', { className: 'check' }, '✓'), h('div', { className: 'card-t' }, it.title)),
+        h('div', { className: 'facts' },
+            hasTarget ? h('div', {}, `Mål: ${fmtNum(c.target_value)}${c.unit ? ' ' + c.unit : ''}` + (c.start_date ? ` · fra ${fmtDate(c.start_date)}` : '') + (c.due_date ? ` til ${fmtDate(c.due_date)}` : '')) : null,
+            c.description ? h('div', {}, c.description) : null),
+        c.rejected_reason ? h('div', { className: 'prev' }, `Din CEO bad om en ny version: "${c.rejected_reason}"`) : null,
+        h('p', { className: 'hint' }, hasTarget
+            ? 'Vi har lavet et forslag med en jævn fordeling. Ret tallene, så de passer til din plan, fx hvis salget kommer sent på året. Tallene er akkumulerede, så det sidste skal nå målet.'
+            : 'Del målet op i 2–6 milepæle med en dato, så vi kan se, om I er på vej.'),
+        h('div', { className: 'body' }, list,
+            warn,
+            field('Hvad skal bære målet? Hvilke kunder, aktiviteter eller forudsætninger?', text(it, 'drivers', 'fx 5 store forsyninger i Q2–Q3, partnersalg via …'))));
 }
 
 function marketingCard(it) {
@@ -192,7 +243,7 @@ function topicCard(it) {
     const body = h('div', { className: 'body' });
     const a0 = it.answer || {};
     if (c.source_kind === 'goal') {
-        body.append(
+        append(body, 
             src.target_value != null ? field(`Ny værdi${src.unit ? ` (${src.unit})` : ''}`, input(it, 'value', 'number', String(src.current_value ?? ''))) : null,
             field('Status på målet', chips(GOAL_STATUS, a0.goal_status, k => { it.answer = { ...(it.answer || {}), goal_status: k }; save(it); })));
     } else if (c.ask_status) {
@@ -202,7 +253,7 @@ function topicCard(it) {
         h('label', { className: 'l q' }, h('span', { className: 'qn' }, String.fromCharCode(97 + i)), q.text),
         answerInput(it, `q${i}`, q))));
     if (c.source_kind === 'customer') {
-        body.append(
+        append(body, 
             h('div', { className: 'row2b' },
                 field('Næste skridt', text(it, 'next_step', 'Hvad skal der ske nu?', false)),
                 field('Hvornår', input(it, 'next_date', 'date'))),
@@ -373,13 +424,13 @@ function render() {
     }
     app.append(
         h('div', { className: 'sec', style: 'margin-top:0' }, `Indrapportering · ${AREA[round.area] || round.area}`),
-        round.practice ? h('div', { className: 'practice' }, 'Øvelse: dine svar bliver ikke gemt på mål eller kunder.') : null,
+        ...(round.practice ? [h('div', { className: 'practice' }, 'Øvelse: dine svar bliver ikke gemt på mål eller kunder.')] : []),
         h('h1', {}, `Hej ${first}`),
         round.followup_of ? h('p', { className: 'intro' }, 'Tak for din indrapportering. Her er nogle opfølgende spørgsmål til dine svar. Det tager kun et par minutter.') :
         h('p', { className: 'intro' }, `Her er spørgsmålene til næste opfølgningsmøde${round.due_date ? `. Svar gerne senest ${fmtDate(round.due_date)}` : ''}. Dine svar gemmes løbende, så du kan holde pause og fortsætte senere. Korte, konkrete svar er fine. Skriv hellere "ved ikke" end ingenting.`));
     const groups = [
         ['followup', 'Opfølgende spørgsmål'], ['matrix', 'Hurtige afklaringer'], ['carried', 'Fra sidst: svarer senere'], ['topic', 'Emner'], ['customer', 'Kunder i proces'],
-        ['marketing', 'Marketing'], ['goal', 'Mål'], ['question', 'Spørgsmål'],
+        ['marketing', 'Marketing'], ['breakdown', 'Nedbryd dine mål'], ['goal', 'Mål'], ['question', 'Spørgsmål'],
     ];
     const groupOf = i => i.context?.carried ? 'carried' : i.context?.source_kind === 'followup' ? 'followup' : i.kind;
     for (const [kind, label] of groups) {
@@ -387,7 +438,7 @@ function render() {
         if (!its.length) continue;
         app.appendChild(h('div', { className: 'sec' }, `${label} (${its.length})`));
         for (const it of its) {
-            it._card = { matrix: matrixCard, topic: topicCard, customer: customerCard, goal: goalCard, marketing: marketingCard, question: questionCard }[it.kind](it);
+            it._card = { matrix: matrixCard, topic: topicCard, customer: customerCard, goal: goalCard, breakdown: breakdownCard, marketing: marketingCard, question: questionCard }[it.kind](it);
             if (it.kind !== 'matrix') addLaterToggle(it, it._card);
             app.appendChild(it._card);
         }

@@ -106,6 +106,46 @@ ANSWER_FORMAT_RULES = (
     "Det afklares i en fælles klik-liste. Max 3 spørgsmål pr. emne, og hellere 2.")
 
 
+def _goal_needs_status(g):
+    """Status kræves først, når målet er startet og har kørt i 30 dage (ellers er der intet at melde)."""
+    start = str(g.get("start_date") or g.get("created_at") or "")[:10]
+    if not start:
+        return True
+    return (date.today() - date.fromisoformat(start)).days >= 30
+
+
+def _quarter_plan(g):
+    """Forslag til nedbrydning: kvartalsvise milepæle (halvår, hvis perioden er over 2 år) med lineært, akkumuleret måltal."""
+    due = str(g.get("due_date") or "")[:10]
+    if not due:
+        return []
+    start = date.fromisoformat(str(g.get("start_date") or date.today().isoformat())[:10])
+    end = date.fromisoformat(due)
+    step = 3 if (end - start).days <= 750 else 6
+    ends, y, m = [], start.year, ((start.month - 1) // step + 1) * step
+    while True:
+        last = date(y, m, 1).replace(day=28) + timedelta(days=4)
+        last = last - timedelta(days=last.day)
+        if last >= end or len(ends) >= 11:
+            break
+        ends.append(last)
+        m += step
+        if m > 12:
+            y, m = y + 1, m - 12
+    ends.append(end)
+    target = None if g.get("target_value") is None else float(g["target_value"])
+    base = float(g.get("start_value") or 0)
+    rows = []
+    for i, d in enumerate(ends):
+        label = f"Q{(d.month - 1) // 3 + 1} {d.year}" if step == 3 else f"{'1.' if d.month <= 6 else '2.'} halvår {d.year}"
+        # Jævn fordeling pr. periode, afrundet til pæne tal (lederen retter den til sin egen plan)
+        val = None if target is None else base + (target - base) * (i + 1) / len(ends)
+        if val is not None:
+            val = round(val, -2) if abs(target - base) >= 1000 else round(val)
+        rows.append({"title": label, "due_date": d.isoformat(), "value": val})
+    return rows
+
+
 def goal_quality(g):
     """Hvor konkret er målet? Returnerer (score 0–100, liste over det der mangler)."""
     checks = [
@@ -115,7 +155,8 @@ def goal_quality(g):
         (bool((g.get("description") or "").strip()), "beskrivelse af hvordan det måles"),
         (g.get("target_value") is None or bool(g.get("unit")), "enhed"),
         (g.get("kind") != "strategisk" or (g.get("milestones_total") or 0) >= 2, "milepæle (strategisk)"),
-        (bool(g.get("last_checkin")) and (date.today() - date.fromisoformat(str(g["last_checkin"])[:10])).days <= 30, "statusopdatering inden for 30 dage"),
+        (not _goal_needs_status(g) or (bool(g.get("last_checkin")) and (date.today() - date.fromisoformat(str(g["last_checkin"])[:10])).days <= 30),
+         "statusopdatering inden for 30 dage"),
     ]
     missing = [label for ok, label in checks if not ok]
     return round((len(checks) - len(missing)) / len(checks) * 100), missing
@@ -590,6 +631,8 @@ def init_db():
             "ALTER TABLE tenders ADD COLUMN IF NOT EXISTS purchase_route TEXT DEFAULT 'selv'",
             # Salgsform og fase efter CEO'ens salgsproces (opdateres fx fra indrapporteringens hurtige lister)
             "ALTER TABLE companies ADD COLUMN IF NOT EXISTS sales_type TEXT",
+            "ALTER TABLE goals ADD COLUMN IF NOT EXISTS breakdown_proposal JSONB",
+            "ALTER TABLE goal_milestones ADD COLUMN IF NOT EXISTS target_value REAL",
             "ALTER TABLE companies ADD COLUMN IF NOT EXISTS sales_phase TEXT",
             "ALTER TABLE companies ADD COLUMN IF NOT EXISTS sales_phase_updated DATE",
             # Opgaver (fx lønsamtaler): aktioner kan stå alene, have beskrivelse, tjekliste og en log med noter
@@ -2893,6 +2936,28 @@ class handler(BaseHTTPRequestHandler):
                     (status, value, blank_to_none(body.get("checkin_date")), rid))
                 db.commit()
                 self._json_response(self._goal_rows(db, "AND g.id = %s", (rid,))[0], 201)
+            elif method == "POST" and sub == "breakdown":
+                g = db.execute("SELECT breakdown_proposal, unit FROM goals WHERE id = %s", (rid,)).fetchone()
+                prop = (g or {}).get("breakdown_proposal") or {}
+                if not prop or prop.get("rejected"):
+                    self._error(400, "Der er intet forslag at behandle"); return True
+                if body.get("action") == "approve":
+                    for r in body.get("rows") or prop["rows"]:
+                        if not (r.get("title") or "").strip():
+                            continue
+                        val = blank_to_none(r.get("value"))
+                        db.execute("INSERT INTO goal_milestones (goal_id, title, due_date, target_value) VALUES (%s,%s,%s,%s)",
+                                   (rid, r["title"].strip() + (f": {float(val):,.0f}".replace(",", ".") + (f" {g['unit']}" if g.get("unit") else "") if val is not None else ""),
+                                    blank_to_none(r.get("due_date")), val))
+                    db.execute("UPDATE goals SET breakdown_proposal = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = %s", (rid,))
+                    log_audit(db, uid, "update", "goal", rid, f"Nedbrydning fra {prop.get('by')} godkendt")
+                elif body.get("action") == "reject":
+                    db.execute("UPDATE goals SET breakdown_proposal = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                               (json.dumps({**prop, "rejected": True, "reason": (body.get("reason") or "").strip()}), rid))
+                else:
+                    self._error(400, "Ukendt handling"); return True
+                db.commit()
+                self._json_response(self._goal_rows(db, "AND g.id = %s", (rid,))[0])
             elif method == "POST" and sub == "milestones":
                 cur = db.execute("INSERT INTO goal_milestones (goal_id, title, due_date) VALUES (%s,%s,%s) RETURNING *",
                                  (rid, body["title"], blank_to_none(body.get("due_date"))))
@@ -3121,6 +3186,11 @@ class handler(BaseHTTPRequestHandler):
                 add(f"goal-overdue-{g['id']}", "kritisk", g["area"], f"Målet \u201d{g['title']}\u201d er over deadline",
                     f"Deadline var {due}. Status: {g['status']}.", "Afslut, forlæng eller justér målet", gl,
                     "Beslut om målet er nået, skal forlænges med en ny plan, eller skal opgives.")
+            prop = g.get("breakdown_proposal") or {}
+            if prop and not prop.get("rejected"):
+                add(f"goal-breakdown-{g['id']}", "vigtig", g["area"], f"{prop.get('by') or 'Lederen'} har nedbrudt ”{g['title']}”",
+                    f"{len(prop.get('rows') or [])} milepæle venter på din godkendelse.", "Godkend eller send tilbage", gl,
+                    "Når du har godkendt, følger AI'en op på milepælene i hver indrapportering.")
             if g.get("target_value") is None and not g.get("milestones_total"):
                 add(f"goal-unmeasurable-{g['id']}", "vigtig", g["area"], f"Målet \u201d{g['title']}\u201d kan ikke måles",
                     "Der er hverken måltal eller milepæle.", "Tilføj måltal eller milepæle", gl,
@@ -3814,7 +3884,19 @@ class handler(BaseHTTPRequestHandler):
             ctx = {k: g.get(k) for k in ("kind", "unit", "start_value", "target_value", "current_value", "due_date",
                                           "status", "last_checkin", "last_comment", "milestones_total", "milestones_done", "start_date",
                                           "description", "quality_missing")}
-            items.append(("goal", "goal", g["id"], g.get("company_id"), g["title"], ctx))
+            nxt = db.execute("""SELECT title, due_date, target_value FROM goal_milestones WHERE goal_id = %s AND NOT done
+                                ORDER BY due_date ASC NULLS LAST LIMIT 1""", (g["id"],)).fetchone()
+            if nxt:
+                ctx["next_milestone"] = dict(nxt)
+            prop = g.get("breakdown_proposal") or {}
+            # Lederen nedbryder selv målet, indtil CEO'en har godkendt mindst 2 milepæle
+            if (g.get("milestones_total") or 0) < 2 and (not prop or prop.get("rejected")):
+                items.append(("breakdown", "goal", g["id"], g.get("company_id"), f"Nedbryd målet: {g['title']}",
+                              {**ctx, "suggested": prop.get("rows") or _quarter_plan(g), "rejected_reason": prop.get("reason"),
+                               "previous_drivers": prop.get("drivers")}))
+            # Status giver først mening, når målet er startet
+            if str(g.get("start_date") or "")[:10] <= date.today().isoformat():
+                items.append(("goal", "goal", g["id"], g.get("company_id"), g["title"], ctx))
         if not only_customers and not tasks_only and area in ("salg", "leverance", "oekonomi"):
             kinds = {g["kind"] for g in area_goals}
             if "drift" not in kinds:
@@ -4111,6 +4193,16 @@ class handler(BaseHTTPRequestHandler):
                     elif ctx.get("target") == "news" and val == "ja" and (a.get("notes") or {}).get(cid):
                         db.execute("INSERT INTO company_notes (company_id, user_name, content) VALUES (%s,%s,%s)",
                                    (int(cid), who, "Indrapporteret: " + a["notes"][cid]))
+                continue
+            if it["kind"] == "breakdown" and it.get("ref_id"):
+                rows = [r for r in (a.get("rows") or []) if (r.get("title") or "").strip()]
+                if rows:
+                    db.execute("UPDATE goals SET breakdown_proposal = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                               (json.dumps({"rows": rows, "drivers": a.get("drivers") or "", "by": who, "round_id": rnd["id"],
+                                            "at": date.today().isoformat()}), it["ref_id"]))
+                    db.execute("""INSERT INTO notifications (company_id, type, title, message, link) VALUES (NULL, 'report', %s, %s, %s)""",
+                               (f"{who} har nedbrudt et mål", f"Forslag til milepæle for ”{it['title'].replace('Nedbryd målet: ', '')}” venter på din godkendelse.",
+                                f"#/goals/{it['ref_id']}"))
                 continue
             if it["kind"] == "goal" and it.get("ref_id") and a.get("status"):
                 value = a.get("value")
@@ -4531,7 +4623,7 @@ class handler(BaseHTTPRequestHandler):
         elif method == "POST" and sub == "ai-generate":
             # Laver spørgsmål til de næste emner, der stadig er skabelon. Frontend kalder igen, til remaining = 0.
             rnd = self._round_full(db, rid)
-            pending = [it for it in rnd["items"] if it["kind"] not in ("topic", "matrix")]
+            pending = [it for it in rnd["items"] if it["kind"] not in ("topic", "matrix", "breakdown")]
             batch = pending[: max(1, min(int(body.get("limit") or 4), 6))]
             if not batch:
                 self._json_response({"remaining": 0, "done": len(rnd["items"])}); return True

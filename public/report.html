@@ -87,6 +87,13 @@
         .mx-note { width: 100%; margin: 0 0 8px; border: 1px solid var(--border); border-radius: 10px; padding: 9px 12px; font-size: 15px; }
         .with-unknown { display: flex; gap: 10px; align-items: center; }
         .with-unknown input:disabled { background: var(--surface2); color: var(--muted); }
+        .bd-rows { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+        .bd-row { display: grid; grid-template-columns: 1fr 150px 140px 28px; gap: 8px; align-items: center; }
+        .bd-rows.nt .bd-row { grid-template-columns: 1fr 150px 28px; }
+        .bd-head { font-size: 12px; font-weight: 600; color: var(--muted); }
+        .bd-row input { padding: 8px 10px; font-size: 15px; }
+        .bd-x { background: none; border: none; color: var(--muted); font-size: 20px; cursor: pointer; }
+        @media (max-width: 520px) { .bd-row { grid-template-columns: 1fr 1fr; } .bd-head { display: none; } }
         .qn { flex-shrink: 0; width: 22px; height: 22px; border-radius: 6px; background: var(--accent-soft); color: var(--accent); font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center; margin-top: 1px; }
     </style>
 </head>
@@ -94,6 +101,6 @@
     <div class="top"><div class="top-in"><span class="brand">systemate<b>CEO</b></span><span class="saved" id="saved"></span></div><div class="bar"><i id="bar" style="width:0"></i></div></div>
     <main id="app"><p class="intro">Indlæser…</p></main>
     <div class="foot" id="foot" hidden><div class="foot-in"><span id="count" style="font-size:14px;color:var(--light)"></span><button class="btn" id="submit">Indsend</button></div></div>
-    <script type="module" src="/static/js/report.js?v=8"></script>
+    <script type="module" src="/static/js/report.js?v=9"></script>
 </body>
 </html>

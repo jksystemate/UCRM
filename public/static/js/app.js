@@ -1,4 +1,4 @@
-import { api } from './api.js?v=47';
+import { api } from './api.js?v=48';
 
 // ─── Constants ───
 const CATEGORY_LABELS = { opkald:'Opkald', tilbud:'Tilbud', moede:'Møde', opfølgning:'Opfølgning', demo:'Demo', kontrakt:'Kontrakt', implementering:'Implementering', support:'Support', faktura:'Fakturering', budget:'Budget', generelt:'Generelt' };
@@ -4676,6 +4676,11 @@ async function renderGoalDetail(container, id) {
             h('div', { className: 'text-sm text-gray-700' }, 'Mangler: ' + g.quality_missing.join(', ') + '.'),
             h('button', { className: 'act-btn mt-2', onClick: () => showGoalForm(g) }, 'Ret målet')));
     }
+    const prop = g.breakdown_proposal;
+    if (prop && !prop.rejected) container.appendChild(breakdownProposalBox(g, prop));
+    else if (prop?.rejected) container.appendChild(h('div', { className: 'quality-box mb-6' },
+        h('b', {}, `Nedbrydningen er sendt tilbage til ${prop.by || 'lederen'}`),
+        h('div', { className: 'text-sm text-gray-700 mt-1' }, (prop.reason ? `Din kommentar: "${prop.reason}". ` : '') + 'Den kommer med igen i næste indrapportering.')));
     const chart = goalHistoryChart(g);
     if (chart) container.appendChild(chart);
 
@@ -5442,7 +5447,7 @@ async function renderReportRound(container, id) {
         container.appendChild(sbox);
     }
 
-    const kinds = [['matrix', 'Hurtige afklaringer'], ['topic', 'Emner'], ['customer', 'Kunder'], ['marketing', 'Marketing'], ['goal', 'Mål'], ['question', 'Spørgsmål']];
+    const kinds = [['matrix', 'Hurtige afklaringer'], ['topic', 'Emner'], ['customer', 'Kunder'], ['marketing', 'Marketing'], ['breakdown', 'Nedbrydning af mål'], ['goal', 'Mål'], ['question', 'Spørgsmål']];
     for (const [kind, label] of kinds) {
         const its = r.items.filter(i => i.kind === kind);
         if (!its.length) continue;
@@ -5465,6 +5470,11 @@ async function renderReportRound(container, id) {
                 else { row('Status', REPORT_CUSTOMER_STATUS[a.status]); row('Siden sidst', a.since_last); row('Næste skridt', a.next_step ? `${a.next_step}${a.next_date ? ' (' + formatDate(a.next_date) + ')' : ''}` : ''); row('Sandsynlighed', a.probability ? `${a.probability} %` : ''); row('Brug for hjælp', a.help); }
             } else if (kind === 'marketing') {
                 row('Aktiviteter', a.activities); row('Resultat', a.results); row('Leads / møder', a.leads || a.meetings ? `${a.leads || 0} leads · ${a.meetings || 0} møder` : ''); row('Næste 14 dage', a.next); row('Læring', a.learnings);
+            } else if (kind === 'breakdown') {
+                for (const m of (a.rows || []).filter(m => (m.title || '').trim()))
+                    row(m.title, [m.due_date ? formatDate(m.due_date) : '', m.value !== '' && m.value != null ? `${fmtNum(Number(m.value))}${it.context?.unit ? ' ' + it.context.unit : ''}` : ''].filter(Boolean).join(' · '));
+                row('Hvad bærer målet', a.drivers);
+                if (a.rows?.length && !r.practice) rows.push(h('a', { href: `#/goals/${it.ref_id}`, className: 'act-btn mt-2 inline-block' }, 'Godkend på målets side'));
             } else if (kind === 'goal') {
                 row('Status', REPORT_GOAL_STATUS[a.status]); row('Værdi', a.value); row('Kommentar', a.comment);
             } else if (kind === 'topic') {
@@ -5980,6 +5990,35 @@ function renderFollowupSection(r) {
 
 
 // Målkvalitet: hvor konkret er målet (måltal, deadline, ansvarlig, målemetode, enhed, milepæle, opfølgning)
+// Lederens forslag til milepæle. CEO'en kan rette tallene, godkende (bliver til milepæle) eller sende det tilbage.
+function breakdownProposalBox(g, prop) {
+    const hasTarget = g.target_value != null;
+    const rows = (prop.rows || []).map(r => ({ ...r }));
+    const table = h('div', { className: 'space-y-2 my-3' }, ...rows.map(r => h('div', { className: 'flex gap-2 items-center flex-wrap' },
+        h('input', { className: 'border border-gray-300 rounded-lg px-2 py-1.5 text-sm flex-1 min-w-[140px]', value: r.title || '', onInput: e => { r.title = e.target.value; } }),
+        h('input', { type: 'date', className: 'border border-gray-300 rounded-lg px-2 py-1.5 text-sm', value: (r.due_date || '').slice(0, 10), onInput: e => { r.due_date = e.target.value; } }),
+        hasTarget ? h('input', { type: 'number', className: 'border border-gray-300 rounded-lg px-2 py-1.5 text-sm w-32', value: r.value ?? '', onInput: e => { r.value = e.target.value; } }) : null,
+        hasTarget && g.unit ? h('span', { className: 'text-xs text-gray-500' }, g.unit) : null)));
+    return h('div', { className: 'bg-white rounded-xl shadow-sm p-5 mb-6', style: 'border:2px solid var(--gold, #c3a95c)' },
+        h('div', { className: 'flex items-center gap-2' }, h('span', { className: 'gs-pill gs-warn' }, 'Venter på dig'),
+            h('b', { className: 'text-gray-900' }, `${prop.by || 'Lederen'} foreslår denne nedbrydning`)),
+        h('div', { className: 'text-xs text-gray-500 mt-1' }, `Indsendt ${formatDate(prop.at)}${prop.round_id ? ' · ' : ''}`,
+            prop.round_id ? h('a', { href: `#/reports/${prop.round_id}`, className: 'hover:underline' }, 'se indrapporteringen') : null),
+        table,
+        prop.drivers ? h('div', { className: 'text-sm text-gray-700 mb-3' }, h('b', {}, 'Hvad skal bære målet: '), prop.drivers) : null,
+        h('div', { className: 'flex gap-2 flex-wrap' },
+            h('button', { className: 'act-btn primary', onClick: async (ev) => {
+                ev.target.disabled = true;
+                try { await api.goalBreakdown(g.id, { action: 'approve', rows }); router(); }
+                catch (e) { ev.target.disabled = false; alert(e.message); }
+            } }, 'Godkend som milepæle'),
+            h('button', { className: 'act-btn', onClick: async () => {
+                const reason = prompt('Hvad skal rettes? Lederen ser din kommentar i næste indrapportering.');
+                if (reason == null) return;
+                try { await api.goalBreakdown(g.id, { action: 'reject', reason }); router(); } catch (e) { alert(e.message); }
+            } }, 'Send tilbage med kommentar')));
+}
+
 function qualityBadge(g) {
     if (g.quality == null) return null;
     const cls = g.quality >= 80 ? 'gs-good' : g.quality >= 60 ? 'gs-warn' : 'gs-bad';

@@ -226,6 +226,7 @@ export const api = {
     updateGoal: (id, data) => request(`/goals/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
     deleteGoal: (id) => request(`/goals/${id}`, { method: 'DELETE' }),
     createGoalCheckin: (id, data) => request(`/goals/${id}/checkins`, { method: 'POST', body: JSON.stringify(data) }),
+    goalFollowupSuggestions: (goalId, notes) => request(`/goals/${goalId}/followup-suggestions`, { method: 'POST', body: JSON.stringify({ notes }) }),
     goalBreakdown: (goalId, data) => request(`/goals/${goalId}/breakdown`, { method: 'POST', body: JSON.stringify(data) }),
     createMilestone: (goalId, data) => request(`/goals/${goalId}/milestones`, { method: 'POST', body: JSON.stringify(data) }),
     updateMilestone: (id, data) => request(`/milestones/${id}`, { method: 'PUT', body: JSON.stringify(data) }),

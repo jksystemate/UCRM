@@ -118,7 +118,13 @@ def _quarter_plan(g):
     """Forslag til nedbrydning: kvartalsvise milepæle (halvår, hvis perioden er over 2 år) med lineært, akkumuleret måltal."""
     due = str(g.get("due_date") or "")[:10]
     if not due:
-        return []
+        return [{"title": "", "due_date": "", "value": None}, {"title": "", "due_date": "", "value": None}]
+    if g.get("kind") == "leverance":
+        start = date.fromisoformat(str(g.get("start_date") or date.today().isoformat())[:10])
+        end = date.fromisoformat(due)
+        mid = start + (end - start) / 2
+        return [{"title": "Udkast klar til gennemgang", "due_date": mid.isoformat(), "value": None},
+                {"title": "Godkendt af CEO", "due_date": end.isoformat(), "value": None}]
     start = date.fromisoformat(str(g.get("start_date") or date.today().isoformat())[:10])
     end = date.fromisoformat(due)
     step = 3 if (end - start).days <= 750 else 6
@@ -149,10 +155,12 @@ def _quarter_plan(g):
 def goal_quality(g):
     """Hvor konkret er målet? Returnerer (score 0–100, liste over det der mangler)."""
     checks = [
-        (g.get("target_value") is not None or (g.get("milestones_total") or 0) >= 2, "måltal eller milepæle"),
+        (g.get("target_value") is not None or (g.get("milestones_total") or 0) >= 2
+         or (g.get("kind") == "leverance" and bool((g.get("description") or "").strip())), "måltal eller milepæle"),
         (bool(g.get("due_date")), "deadline"),
         (bool(g.get("owner_role")), "ansvarlig"),
-        (bool((g.get("description") or "").strip()), "beskrivelse af hvordan det måles"),
+        (bool((g.get("description") or "").strip()),
+         "beskrivelse af hvornår målet er nået" if g.get("kind") == "leverance" else "beskrivelse af hvordan det måles"),
         (g.get("target_value") is None or bool(g.get("unit")), "enhed"),
         (g.get("kind") != "strategisk" or (g.get("milestones_total") or 0) >= 2, "milepæle (strategisk)"),
         (not _goal_needs_status(g) or (bool(g.get("last_checkin")) and (date.today() - date.fromisoformat(str(g["last_checkin"])[:10])).days <= 30),
@@ -632,6 +640,8 @@ def init_db():
             # Salgsform og fase efter CEO'ens salgsproces (opdateres fx fra indrapporteringens hurtige lister)
             "ALTER TABLE companies ADD COLUMN IF NOT EXISTS sales_type TEXT",
             "ALTER TABLE goals ADD COLUMN IF NOT EXISTS breakdown_proposal JSONB",
+            "ALTER TABLE goals ADD COLUMN IF NOT EXISTS document_url TEXT",
+            "ALTER TABLE goals ADD COLUMN IF NOT EXISTS parent_goal_id INTEGER REFERENCES goals(id) ON DELETE SET NULL",
             "ALTER TABLE goal_milestones ADD COLUMN IF NOT EXISTS target_value REAL",
             "ALTER TABLE companies ADD COLUMN IF NOT EXISTS sales_phase TEXT",
             "ALTER TABLE companies ADD COLUMN IF NOT EXISTS sales_phase_updated DATE",
@@ -2821,7 +2831,10 @@ class handler(BaseHTTPRequestHandler):
                    (SELECT COUNT(*) FROM goal_milestones m WHERE m.goal_id = g.id) AS milestones_total,
                    (SELECT COUNT(*) FROM goal_milestones m WHERE m.goal_id = g.id AND m.done) AS milestones_done,
                    (SELECT c.comment FROM goal_checkins c WHERE c.goal_id = g.id ORDER BY c.checkin_date DESC, c.id DESC LIMIT 1) AS last_comment,
-                   (SELECT COUNT(*) FROM meeting_actions a WHERE a.goal_id = g.id AND a.status = 'open') AS open_actions
+                   (SELECT COUNT(*) FROM meeting_actions a WHERE a.goal_id = g.id AND a.status = 'open') AS open_actions,
+                   (SELECT COUNT(*) FROM meeting_actions a WHERE a.goal_id = g.id) AS actions_total,
+                   (SELECT COUNT(*) FROM goals c WHERE c.parent_goal_id = g.id) AS children_total,
+                   (SELECT p.title FROM goals p WHERE p.id = g.parent_goal_id) AS parent_title
             FROM goals g LEFT JOIN companies co ON g.company_id = co.id
             WHERE 1=1 {where}
             ORDER BY CASE g.kind WHEN 'drift' THEN 0 ELSE 1 END, g.due_date ASC NULLS LAST, g.id
@@ -2856,7 +2869,7 @@ class handler(BaseHTTPRequestHandler):
         sub = parts[3] if len(parts) > 3 else None
 
         GOAL_FIELDS = ["area", "kind", "title", "description", "owner_role", "company_id", "unit", "start_value",
-                       "target_value", "current_value", "start_date", "due_date", "status", "archived"]
+                       "target_value", "current_value", "start_date", "due_date", "status", "archived", "document_url", "parent_goal_id"]
         MEETING_FIELDS = ["area", "title", "meeting_date", "participants", "status", "summary", "next_meeting_date"]
         ACTION_FIELDS = ["meeting_id", "area", "goal_id", "company_id", "kind", "title", "owner", "due_date", "status",
                          "description", "checklist", "notes"]
@@ -2909,6 +2922,7 @@ class handler(BaseHTTPRequestHandler):
                 goal["milestones"] = [dict(r) for r in db.execute(
                     "SELECT * FROM goal_milestones WHERE goal_id = %s ORDER BY due_date ASC NULLS LAST, id", (rid,)).fetchall()]
                 goal["actions"] = self._action_rows(db, "AND a.goal_id = %s", (rid,))
+                goal["children"] = self._goal_rows(db, "AND g.parent_goal_id = %s", (rid,))
                 self._json_response(goal)
             elif method == "POST" and rid is None:
                 vals = {k: blank_to_none(body.get(k)) for k in GOAL_FIELDS if k in body}
@@ -2936,6 +2950,39 @@ class handler(BaseHTTPRequestHandler):
                     (status, value, blank_to_none(body.get("checkin_date")), rid))
                 db.commit()
                 self._json_response(self._goal_rows(db, "AND g.id = %s", (rid,))[0], 201)
+            elif method == "POST" and sub == "followup-suggestions":
+                if not os.environ.get("ANTHROPIC_API_KEY"):
+                    self._error(400, "AI er ikke sat op (ANTHROPIC_API_KEY mangler)"); return True
+                rows = self._goal_rows(db, "AND g.id = %s", (rid,))
+                if not rows:
+                    self._error(404, "Mål ikke fundet"); return True
+                g = rows[0]
+                payload = {"mål": g["title"], "område": g["area"], "ansvarlig": g.get("owner_role"),
+                           "hvornår_nået": g.get("description"), "noter_fra_ceo": body.get("notes") or "",
+                           "milepæle": [r["title"] for r in db.execute("SELECT title FROM goal_milestones WHERE goal_id = %s ORDER BY due_date", (rid,)).fetchall()],
+                           "statuskommentarer": [r["comment"] for r in db.execute(
+                               "SELECT comment FROM goal_checkins WHERE goal_id = %s AND comment IS NOT NULL ORDER BY checkin_date DESC LIMIT 5", (rid,)).fetchall()],
+                           "findes_allerede": [c["title"] for c in self._goal_rows(db, "AND g.parent_goal_id = %s", (rid,))]
+                                              + [a["title"] for a in self._action_rows(db, "AND a.goal_id = %s", (rid,))],
+                           "i_dag": date.today().isoformat()}
+                system = (self._ai_preamble(db, g["area"]) +
+                          "\nOpgave: Et leverancemål (fx en strategi eller plan) er nået. Foreslå 3–7 konkrete ting, der skal ske nu, "
+                          "så leverancen bliver til handling. Brug type 'drift' til målbare mål med tal og deadline (fx antal møder, leads, "
+                          "omsætning, en hjemmeside live), og type 'opgave' til enkeltstående handlinger med en frist. Hvert punkt skal have en ejer "
+                          "(CCO, COO, CFO eller CEO). Driftmål skal have et måltal og en enhed. Gentag ikke det, der findes allerede. Skriv kort og på dansk.")
+                schema = {"type": "object", "additionalProperties": False, "required": ["items"], "properties": {"items": {
+                    "type": "array", "items": {"type": "object", "additionalProperties": False,
+                        "required": ["type", "title", "owner_role", "due_date", "target_value", "unit", "why"],
+                        "properties": {"type": {"type": "string", "enum": ["drift", "opgave"]}, "title": {"type": "string"},
+                                       "owner_role": {"type": "string", "enum": ["CCO", "COO", "CFO", "CEO"]},
+                                       "due_date": {"type": "string", "description": "ÅÅÅÅ-MM-DD"},
+                                       "target_value": {"type": ["number", "null"]}, "unit": {"type": ["string", "null"]},
+                                       "why": {"type": "string"}}}}}}
+                try:
+                    data, _ = self._claude(system, json.dumps(payload, ensure_ascii=False, default=str), schema, effort="medium", max_tokens=4000)
+                except Exception as e:
+                    self._error(502, f"AI kunne ikke lave forslag: {e}"); return True
+                self._json_response({"items": data["items"][:8]})
             elif method == "POST" and sub == "breakdown":
                 g = db.execute("SELECT breakdown_proposal, unit FROM goals WHERE id = %s", (rid,)).fetchone()
                 prop = (g or {}).get("breakdown_proposal") or {}
@@ -3031,7 +3078,7 @@ class handler(BaseHTTPRequestHandler):
                 area = mtg["area"]
                 # Ledelsesmødet (tværgående) gennemgår tværgående mål og alle strategiske mål
                 if area == "tvaers":
-                    goal_where, gp = "AND NOT g.archived AND (g.area = 'tvaers' OR g.kind = 'strategisk')", None
+                    goal_where, gp = "AND NOT g.archived AND (g.area = 'tvaers' OR g.kind IN ('strategisk', 'leverance'))", None
                     act_where, ap = "", None
                 else:
                     goal_where, gp = "AND NOT g.archived AND g.area = %s", (area,)
@@ -3175,6 +3222,10 @@ class handler(BaseHTTPRequestHandler):
         goals = self._goal_rows(db, "AND NOT g.archived")
         for g in goals:
             gl = f"#/goals/{g['id']}"
+            if g.get("kind") == "leverance" and g["status"] == "done" and not g.get("children_total") and not g.get("actions_total"):
+                add(f"goal-delivered-{g['id']}", "vigtig", g["area"], f"”{g['title']}” er leveret. Hvad sker der nu?",
+                    "Der er ikke oprettet driftmål eller opgaver ud fra den endnu.", "Opret driftmål og opgaver", gl,
+                    "En strategi eller plan skaber først værdi, når den bliver til mål og opgaver med en ejer.")
             if g["status"] == "done":
                 continue
             due = str(g.get("due_date") or "")[:10]

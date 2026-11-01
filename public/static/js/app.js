@@ -1,4 +1,4 @@
-import { api } from './api.js?v=48';
+import { api } from './api.js?v=49';
 
 // ─── Constants ───
 const CATEGORY_LABELS = { opkald:'Opkald', tilbud:'Tilbud', moede:'Møde', opfølgning:'Opfølgning', demo:'Demo', kontrakt:'Kontrakt', implementering:'Implementering', support:'Support', faktura:'Fakturering', budget:'Budget', generelt:'Generelt' };
@@ -4324,7 +4324,7 @@ const MEETING_TITLES = {
     oekonomi: 'Økonomi med CFO',
     tvaers: 'Ledelsesmøde · strategi',
 };
-const GOAL_KIND_LABELS = { drift: 'Driftsmål', strategisk: 'Strategisk mål' };
+const GOAL_KIND_LABELS = { drift: 'Driftsmål', strategisk: 'Strategisk mål', leverance: 'Leverancemål' };
 const GOAL_STATUS = {
     not_started: { label: 'Ikke vurderet', cls: 'gs-none' },
     on_track: { label: 'På sporet', cls: 'gs-good' },
@@ -4512,17 +4512,20 @@ async function renderGoals(container) {
             h('div', { className: 'kpi-s' }, l === 'Ikke fulgt op' ? `> ${STALE_DAYS} dage uden status` : 'mål')))
     ));
 
-    for (const kind of ['drift', 'strategisk']) {
+    const KIND_SECTIONS = {
+        drift: ['Driftsmål', 'Kortsigtede mål: salgstal, leveranceplaner, budgetter', 'Ingen driftsmål endnu, fx en leveranceplan til en kunde eller et salgsmål for året.'],
+        strategisk: ['Strategiske mål', 'Langsigtede retninger: position, kompetencer, måden vi arbejder på', 'Ingen strategiske mål endnu.'],
+        leverance: ['Leverancemål', 'Noget der skal udarbejdes: en strategi, en plan, en beslutning. Bliver til driftmål og opgaver, når det er leveret',
+                    'Ingen leverancemål endnu, fx en go-to-market-strategi eller en budgetmodel.'],
+    };
+    for (const kind of ['drift', 'strategisk', 'leverance']) {
         const ks = list.filter(g => g.kind === kind);
+        const [title, sub, empty] = KIND_SECTIONS[kind];
         container.appendChild(h('div', { className: 'flex items-baseline gap-3 mb-3 mt-2' },
-            h('h2', { className: 'text-lg font-bold text-gray-900' }, kind === 'drift' ? 'Driftsmål' : 'Strategiske mål'),
-            h('span', { className: 'text-sm text-gray-400' }, kind === 'drift'
-                ? 'Kortsigtede mål: salgstal, leveranceplaner, budgetter'
-                : 'Langsigtede retninger: position, kompetencer, måden vi arbejder på')));
+            h('h2', { className: 'text-lg font-bold text-gray-900' }, title),
+            h('span', { className: 'text-sm text-gray-400' }, sub)));
         if (ks.length === 0) {
-            container.appendChild(h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6 text-gray-400 text-sm' },
-                kind === 'drift' ? 'Ingen driftsmål endnu, fx en leveranceplan til en kunde eller et salgsmål for året.'
-                    : 'Ingen strategiske mål endnu.'));
+            container.appendChild(h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6 text-gray-400 text-sm' }, empty));
             continue;
         }
         container.appendChild(h('div', { className: 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 mb-8' }, ...ks.map(g => goalCard(g))));
@@ -4539,6 +4542,30 @@ async function showGoalForm(existing, defaults = {}) {
     const lbl = (text, el, hint) => h('div', {}, h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, text), el,
         hint ? h('div', { className: 'text-xs text-gray-400 mt-1' }, hint) : null);
     const roleSel = sel('owner_role', { '': 'Vælg...', ...ROLE_LABELS }, g.owner_role || AREA_ROLE[g.area]);
+    const kindSel = sel('kind', GOAL_KIND_LABELS, g.kind);
+    const descLabel = h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' });
+    const descInput = h('textarea', { name: 'description', rows: '3', className: 'w-full border border-gray-300 rounded-lg px-3 py-2' }, g.description || '');
+    const descField = h('div', {}, descLabel, descInput);
+    const inp = (name, value, placeholder) => h('input', { name, value: value ?? '', className: 'w-full border border-gray-300 rounded-lg px-3 py-2', ...(placeholder ? { placeholder } : {}) });
+    const valueFields = h('div', { className: 'grid grid-cols-3 gap-3' },
+        lbl('Startværdi', inp('start_value', g.start_value)), lbl('Målværdi', inp('target_value', g.target_value)),
+        lbl('Enhed', inp('unit', g.unit, 'målepunkter, %, kr.')));
+    const docField = lbl('Link til dokumentet (valgfri)', h('input', { type: 'url', name: 'document_url', value: g.document_url || '',
+        placeholder: 'fx SharePoint, Google Docs eller Notion', className: 'w-full border border-gray-300 rounded-lg px-3 py-2' }),
+        'Tilføj linket, når der er et udkast. Så kan alle finde den nyeste version fra målet.');
+    const kindHint = h('div', { className: 'text-xs text-gray-500 -mt-2' });
+    const syncKind = () => {
+        const lev = kindSel.value === 'leverance';
+        valueFields.style.display = lev ? 'none' : '';
+        docField.style.display = lev ? '' : 'none';
+        descLabel.textContent = lev ? 'Hvornår er målet nået? *' : 'Hvordan måles det?';
+        descInput.placeholder = lev ? 'Fx: Go-to-market-strategi for Danmark og Norden er godkendt af CEO. Den indeholder position, USP\'er, målgrupper, kanaler og en handlingsplan med ejere og datoer.'
+                                    : 'Fx antal målepunkter i underskrevne kontrakter';
+        if (lev) descInput.setAttribute('required', ''); else descInput.removeAttribute('required');
+        kindHint.textContent = lev ? 'Leverancemål: resultatet er et dokument eller en beslutning, ikke et tal. Når det er nået, laver du driftmål og opgaver ud fra det.' : '';
+    };
+    kindSel.addEventListener('change', syncKind);
+    syncKind();
 
     const form = h('form', { className: 'space-y-4', onSubmit: async (e) => {
         e.preventDefault();
@@ -4551,7 +4578,10 @@ async function showGoalForm(existing, defaults = {}) {
             start_date: fd.get('start_date') || null, due_date: fd.get('due_date') || null,
             company_id: fd.get('company_id') ? parseInt(fd.get('company_id')) : null,
         };
-        if (!existing) data.current_value = data.start_value;
+        if (data.kind === 'leverance') Object.assign(data, { start_value: null, target_value: null, unit: null, current_value: null });
+        data.document_url = fd.get('document_url') || null;
+        if (!existing && g.parent_goal_id) data.parent_goal_id = g.parent_goal_id;
+        if (!existing && data.kind !== 'leverance') data.current_value = data.start_value;
         try {
             const saved = existing ? await api.updateGoal(existing.id, data) : await api.createGoal(data);
             closeModal();
@@ -4560,19 +4590,17 @@ async function showGoalForm(existing, defaults = {}) {
     }},
         lbl('Mål *', h('input', { name: 'title', required: '', value: g.title || '', className: 'w-full border border-gray-300 rounded-lg px-3 py-2', placeholder: 'Fx Sælge 150.000 målepunkter i 2027' })),
         h('div', { className: 'grid grid-cols-3 gap-3' },
-            lbl('Type *', sel('kind', GOAL_KIND_LABELS, g.kind)),
+            lbl('Type *', kindSel),
             lbl('Område *', (() => {
                 const s = sel('area', GOAL_AREAS, g.area);
                 s.addEventListener('change', () => { roleSel.value = AREA_ROLE[s.value]; });
                 return s;
             })()),
             lbl('Ansvarlig', roleSel)),
-        lbl('Hvordan måles det?', h('textarea', { name: 'description', rows: '2', className: 'w-full border border-gray-300 rounded-lg px-3 py-2',
-            placeholder: 'Fx antal målepunkter i underskrevne kontrakter' }, g.description || '')),
-        h('div', { className: 'grid grid-cols-3 gap-3' },
-            lbl('Startværdi', h('input', { name: 'start_value', value: g.start_value ?? '', className: 'w-full border border-gray-300 rounded-lg px-3 py-2' })),
-            lbl('Målværdi', h('input', { name: 'target_value', value: g.target_value ?? '', className: 'w-full border border-gray-300 rounded-lg px-3 py-2' })),
-            lbl('Enhed', h('input', { name: 'unit', value: g.unit || '', className: 'w-full border border-gray-300 rounded-lg px-3 py-2', placeholder: 'målepunkter, %, kr.' }))),
+        kindHint,
+        descField,
+        valueFields,
+        docField,
         h('div', { className: 'grid grid-cols-2 gap-3' },
             lbl('Start', h('input', { type: 'date', name: 'start_date', value: (g.start_date || '').slice(0, 10), className: 'w-full border border-gray-300 rounded-lg px-3 py-2' })),
             lbl('Deadline', h('input', { type: 'date', name: 'due_date', value: (g.due_date || '').slice(0, 10), className: 'w-full border border-gray-300 rounded-lg px-3 py-2' }))),
@@ -4698,7 +4726,8 @@ async function renderGoalDetail(container, id) {
                     g.archived ? h('span', { className: 'gs-pill gs-none' }, 'Arkiveret') : null),
                 h('h1', { className: 'text-2xl font-bold text-gray-900' }, g.title),
                 g.company_name ? h('a', { href: `#/companies/${g.company_id}`, className: 'text-blue-600 hover:underline' }, g.company_name) : null,
-                g.description ? h('p', { className: 'text-gray-500 mt-1 max-w-3xl' }, g.description) : null),
+                g.description ? h('p', { className: 'text-gray-500 mt-1 max-w-3xl' }, g.kind === 'leverance' ? h('b', { className: 'text-gray-600' }, 'Nået når: ') : null, g.description) : null,
+                g.parent_goal_id ? h('div', { className: 'text-sm text-gray-500 mt-1' }, 'Udspringer af ', h('a', { href: `#/goals/${g.parent_goal_id}`, className: 'text-blue-600 hover:underline' }, g.parent_title || 'et andet mål')) : null),
             h('div', { className: 'flex gap-2 flex-shrink-0' },
                 h('button', { className: 'bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 font-medium', onClick: () => showCheckinForm(g) }, 'Opdater status'),
                 h('button', { className: 'bg-white border border-gray-300 text-gray-700 px-3 py-2 rounded-lg hover:bg-gray-50', onClick: () => showGoalForm(g) }, 'Rediger'),
@@ -4714,7 +4743,13 @@ async function renderGoalDetail(container, id) {
     const valueEl = (n, unit) => n == null ? '–' : h('span', {}, unit === '%' ? `${fmtNum(n)}%` : fmtNum(n),
         unit && unit !== '%' ? h('small', {}, ` ${unit}`) : null);
     const behind = p != null && e != null && p < e - 0.05;
-    container.appendChild(h('div', { className: 'grid grid-cols-2 md:grid-cols-5 gap-3 mb-6' },
+    if (g.kind === 'leverance') container.appendChild(h('div', { className: 'grid grid-cols-2 md:grid-cols-4 gap-3 mb-6' },
+        tile((GOAL_STATUS[g.status] || GOAL_STATUS.not_started).label, 'Status', lastUpdateText(g), g.status === 'done' ? 'good' : goalIsStale(g) ? 'warn' : ''),
+        tile(g.milestones.length ? `${g.milestones.filter(m => m.done).length}/${g.milestones.length}` : '–', 'Milepæle', g.milestones.length ? 'nået' : 'ingen endnu'),
+        tile(g.document_url ? h('a', { href: g.document_url, target: '_blank', rel: 'noopener', className: 'hover:underline' }, 'Åbn ↗') : '–', 'Dokument',
+            g.document_url ? 'nyeste version' : h('button', { className: 'text-blue-600 hover:underline', onClick: () => showGoalForm(g) }, 'Tilføj link')),
+        tile(g.due_date ? formatDate(g.due_date) : '–', 'Deadline', g.due_date ? `${Math.max(0, daysBetween(todayIso(), g.due_date))} dage tilbage` : 'ingen deadline')));
+    else container.appendChild(h('div', { className: 'grid grid-cols-2 md:grid-cols-5 gap-3 mb-6' },
         tile(valueEl(g.current_value ?? g.start_value, g.unit), 'Nu', lastUpdateText(g), goalIsStale(g) ? 'warn' : ''),
         tile(valueEl(g.target_value, g.unit), 'Mål', g.start_value != null ? `fra ${fmtGoalValue(g.start_value, g.unit)}` : ''),
         tile(p == null ? '–' : `${Math.round(p * 100)}%`, 'Fremdrift', 'af målet', behind ? 'bad' : (p != null ? 'good' : '')),
@@ -4728,6 +4763,7 @@ async function renderGoalDetail(container, id) {
             h('div', { className: 'text-sm text-gray-700' }, 'Mangler: ' + g.quality_missing.join(', ') + '.'),
             h('button', { className: 'act-btn mt-2', onClick: () => showGoalForm(g) }, 'Ret målet')));
     }
+    if (g.kind === 'leverance') container.appendChild(deliveryFollowupBox(g));
     const prop = g.breakdown_proposal;
     if (prop && !prop.rejected) container.appendChild(breakdownProposalBox(g, prop));
     else if (prop?.rejected) container.appendChild(h('div', { className: 'quality-box mb-6' },
@@ -4830,7 +4866,7 @@ async function renderMeetings(container) {
     if (cfg) container.appendChild(aiContextCard(cfg));
     const grid = h('div', { className: 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 mb-8' });
     for (const area of Object.keys(GOAL_AREAS)) {
-        const goals = ov.goals.filter(g => area === 'tvaers' ? (g.area === 'tvaers' || g.kind === 'strategisk') : g.area === area);
+        const goals = ov.goals.filter(g => area === 'tvaers' ? (g.area === 'tvaers' || g.kind !== 'drift') : g.area === area);
         const acts = ov.open_actions.filter(a => area === 'tvaers' || a.area === area);
         const last = ov.last_meetings.find(m => m.area === area && m.status === 'done') || null;
         const planned = ov.planned_meetings.find(m => m.area === area) || null;
@@ -4905,7 +4941,7 @@ async function renderMeetingDetail(container, id) {
     async function saveNotes() { await api.updateMeeting(id, { notes }); }
     async function reload() { m = await api.getMeeting(id); draw(); }
 
-    const goalsOf = kind => m.goals.filter(g => g.kind === kind);
+    const goalsOf = kind => m.goals.filter(g => kind === 'strategisk' ? g.kind !== 'drift' : g.kind === kind);
     function progress() {
         const fu = m.followup_actions.filter(a => a.kind === 'aktion');
         const fuDone = fu.filter(a => a.status === 'done' || notes.carried.includes(a.id)).length;
@@ -5177,7 +5213,7 @@ async function renderMeetingDetail(container, id) {
             const checks = [
                 [pr.actions[0] >= pr.actions[1], `Aktioner fra sidst gennemgået (${pr.actions[0]}/${pr.actions[1]})`, fuOpen.map(a => a.title), 1],
                 [pr.drift[0] >= pr.drift[1], `Driftsmål opdateret (${pr.drift[0]}/${pr.drift[1]})`, notChecked.filter(g => g.kind === 'drift').map(g => g.title), 2],
-                [pr.strategi[0] >= pr.strategi[1], `Strategiske mål opdateret (${pr.strategi[0]}/${pr.strategi[1]})`, notChecked.filter(g => g.kind === 'strategisk').map(g => g.title), 3],
+                [pr.strategi[0] >= pr.strategi[1], `Strategiske mål opdateret (${pr.strategi[0]}/${pr.strategi[1]})`, notChecked.filter(g => g.kind !== 'drift').map(g => g.title), 3],
                 [notes.visited.includes('risks'), 'Sager & risici gennemgået', [], 4],
                 [missingOwner.length === 0, 'Alle nye aktioner har ansvarlig og frist', missingOwner.map(a => a.title), 5],
             ];
@@ -5266,7 +5302,7 @@ function renderGoalsStrip(ceo) {
     }
     wrap.appendChild(grid);
 
-    const strategic = ceo.goals.filter(g => g.kind === 'strategisk');
+    const strategic = ceo.goals.filter(g => g.kind !== 'drift');
     if (strategic.length) {
         wrap.appendChild(h('div', { className: 'ov-label', style: 'margin:18px 0 8px' }, 'Strategiske mål'));
         wrap.appendChild(h('div', { className: 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3' }, ...strategic.map(g => goalCard(g, { compact: true }))));
@@ -6043,6 +6079,73 @@ function renderFollowupSection(r) {
 
 
 // Målkvalitet: hvor konkret er målet (måltal, deadline, ansvarlig, målemetode, enhed, milepæle, opfølgning)
+// Leverancemål: før det er nået, en knap til at markere det. Bagefter: de driftmål og opgaver, det bliver til.
+function deliveryFollowupBox(g) {
+    const box = h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6' });
+    if (g.status !== 'done') {
+        box.append(h('b', { className: 'text-gray-900' }, 'Når leverancen er godkendt'),
+            h('p', { className: 'text-sm text-gray-600 mt-1 mb-3' }, 'Markér målet som nået. Så hjælper appen dig med at gøre indholdet til driftmål og opgaver med en ejer og en frist.'),
+            h('button', { className: 'act-btn primary', onClick: async () => {
+                if (!g.document_url && !confirm('Der er ikke tilknyttet et link til dokumentet. Markér som nået alligevel?')) return;
+                await api.createGoalCheckin(g.id, { status: 'done', comment: 'Leveret og godkendt' });
+                router();
+            } }, 'Markér som nået'));
+        return box;
+    }
+    const children = g.children || [], tasks = (g.actions || []).filter(a => a.kind === 'aktion');
+    box.append(h('div', { className: 'flex items-center gap-2' }, h('span', { className: 'gs-pill gs-good' }, 'Leveret'),
+        h('b', { className: 'text-gray-900' }, 'Hvad kommer ud af det?')),
+        h('p', { className: 'text-sm text-gray-600 mt-1' }, 'Driftmål og opgaver, der gør leverancen til handling. De bliver fulgt op i møder og indrapporteringer som alle andre.'));
+    if (children.length || tasks.length) box.appendChild(h('div', { className: 'mt-3 space-y-1' },
+        ...children.map(c => h('a', { href: `#/goals/${c.id}`, className: 'flex items-center gap-2 text-sm hover:underline' },
+            h('span', { className: 'goal-kind' }, 'Driftmål'), h('span', { className: 'text-gray-900' }, c.title), c.owner_role ? h('span', { className: 'text-gray-400' }, c.owner_role) : null)),
+        ...tasks.map(a => h('div', { className: 'flex items-center gap-2 text-sm' },
+            h('span', { className: 'goal-kind' }, 'Opgave'), h('span', { className: a.status === 'done' ? 'line-through text-gray-400' : 'text-gray-900' }, a.title),
+            h('span', { className: 'text-gray-400' }, [a.owner, a.due_date ? formatDate(a.due_date) : ''].filter(Boolean).join(' · '))))));
+    const sugg = h('div', { className: 'mt-3' });
+    const notes = h('textarea', { rows: '2', className: 'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm', placeholder: 'Valgfrit: de vigtigste beslutninger i dokumentet, fx "Norge først, nordisk hjemmeside i Q1, 2 messer"' });
+    const aiBtn = h('button', { className: 'act-btn primary', onClick: async () => {
+        aiBtn.disabled = true; aiBtn.textContent = 'AI tænker…';
+        try {
+            const { items } = await api.goalFollowupSuggestions(g.id, notes.value);
+            sugg.innerHTML = '';
+            const picks = items.map(it => ({ it, on: true }));
+            sugg.append(h('div', { className: 'text-sm font-semibold text-gray-900 mb-2' }, 'Forslag. Fjern fluebenet ved dem, du ikke vil have'),
+                ...picks.map(pk => h('label', { className: 'flex gap-2 items-start py-2 border-b border-gray-100 text-sm' },
+                    h('input', { type: 'checkbox', checked: '', className: 'mt-1', onChange: e => { pk.on = e.target.checked; } }),
+                    h('div', {}, h('div', {}, h('span', { className: 'goal-kind mr-2' }, pk.it.type === 'drift' ? 'Driftmål' : 'Opgave'),
+                        h('b', {}, pk.it.title)),
+                        h('div', { className: 'text-gray-500' }, [pk.it.owner_role, pk.it.due_date ? `frist ${formatDate(pk.it.due_date)}` : '',
+                            pk.it.target_value != null ? `mål ${fmtNum(pk.it.target_value)}${pk.it.unit ? ' ' + pk.it.unit : ''}` : ''].filter(Boolean).join(' · ')),
+                        h('div', { className: 'text-gray-400 text-xs' }, pk.it.why)))),
+                h('button', { className: 'act-btn primary mt-3', onClick: async (ev) => {
+                    ev.target.disabled = true;
+                    for (const { it } of picks.filter(pk => pk.on)) {
+                        if (it.type === 'drift') await api.createGoal({ title: it.title, area: g.area, kind: 'drift', owner_role: it.owner_role,
+                            description: it.why, unit: it.unit, start_value: 0, current_value: 0, target_value: it.target_value,
+                            start_date: todayIso(), due_date: it.due_date || null, parent_goal_id: g.id });
+                        else await api.createAction({ title: it.title, area: g.area, kind: 'aktion', owner: it.owner_role, due_date: it.due_date || null,
+                            goal_id: g.id, description: it.why });
+                    }
+                    router();
+                } }, 'Opret de valgte'));
+        } catch (e) { sugg.innerHTML = ''; sugg.appendChild(h('div', { className: 'text-sm text-red-600' }, e.message)); }
+        aiBtn.disabled = false; aiBtn.textContent = '✦ Foreslå med AI';
+    } }, '✦ Foreslå med AI');
+    box.append(h('div', { className: 'mt-4' }, notes),
+        h('div', { className: 'flex gap-2 flex-wrap mt-2' }, aiBtn,
+            h('button', { className: 'act-btn', onClick: () => showGoalForm(null, { kind: 'drift', area: g.area, owner_role: g.owner_role, parent_goal_id: g.id }) }, '+ Driftmål'),
+            h('button', { className: 'act-btn', onClick: async () => {
+                const title = prompt('Opgave:');
+                if (!title) return;
+                const due = await pickDate('Frist for opgaven', workdayIso(addDaysIso(14)), 'Opret opgave');
+                await api.createAction({ title, area: g.area, kind: 'aktion', owner: g.owner_role, due_date: due, goal_id: g.id });
+                router();
+            } }, '+ Opgave')),
+        sugg);
+    return box;
+}
+
 // Lederens forslag til milepæle. CEO'en kan rette tallene, godkende (bliver til milepæle) eller sende det tilbage.
 function breakdownProposalBox(g, prop) {
     const hasTarget = g.target_value != null;

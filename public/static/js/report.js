@@ -173,7 +173,7 @@ function goalCard(it) {
     return h('div', { className: 'card' },
         h('div', { className: 'card-h' }, h('span', { className: 'check' }, '✓'), h('div', { className: 'card-t' }, it.title)),
         h('div', { className: 'facts' },
-            h('div', {}, c.kind === 'strategisk' ? 'Strategisk mål' : 'Driftsmål'),
+            h('div', {}, { strategisk: 'Strategisk mål', leverance: 'Leverancemål' }[c.kind] || 'Driftsmål'),
             hasTarget ? h('div', {}, `Nu: ${fmtNum(c.current_value ?? c.start_value)} af ${fmtNum(c.target_value)}${c.unit ? ' ' + c.unit : ''}` + (c.due_date ? ` · deadline ${fmtDate(c.due_date)}` : '')) : null,
             c.milestones_total ? h('div', {}, `Milepæle: ${c.milestones_done} af ${c.milestones_total} nået`) : null),
         c.last_comment ? h('div', { className: 'prev' }, `Sidst: "${c.last_comment}"`) : null,

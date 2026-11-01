@@ -119,7 +119,7 @@ def _quarter_plan(g):
     due = str(g.get("due_date") or "")[:10]
     if not due:
         return [{"title": "", "due_date": "", "value": None}, {"title": "", "due_date": "", "value": None}]
-    if g.get("kind") == "leverance":
+    if g.get("measure") == "dokument":
         start = date.fromisoformat(str(g.get("start_date") or date.today().isoformat())[:10])
         end = date.fromisoformat(due)
         mid = start + (end - start) / 2
@@ -156,13 +156,13 @@ def goal_quality(g):
     """Hvor konkret er målet? Returnerer (score 0–100, liste over det der mangler)."""
     checks = [
         (g.get("target_value") is not None or (g.get("milestones_total") or 0) >= 2
-         or (g.get("kind") == "leverance" and bool((g.get("description") or "").strip())), "måltal eller milepæle"),
+         or (g.get("measure") == "dokument" and bool((g.get("description") or "").strip())), "måltal eller milepæle"),
         (bool(g.get("due_date")), "deadline"),
         (bool(g.get("owner_role")), "ansvarlig"),
         (bool((g.get("description") or "").strip()),
-         "beskrivelse af hvornår målet er nået" if g.get("kind") == "leverance" else "beskrivelse af hvordan det måles"),
+         "beskrivelse af hvornår målet er nået" if g.get("measure") == "dokument" else "beskrivelse af hvordan det måles"),
         (g.get("target_value") is None or bool(g.get("unit")), "enhed"),
-        (g.get("kind") != "strategisk" or (g.get("milestones_total") or 0) >= 2, "milepæle (strategisk)"),
+        (g.get("kind") != "strategisk" or g.get("measure") == "dokument" or (g.get("milestones_total") or 0) >= 2, "milepæle (strategisk)"),
         (not _goal_needs_status(g) or (bool(g.get("last_checkin")) and (date.today() - date.fromisoformat(str(g["last_checkin"])[:10])).days <= 30),
          "statusopdatering inden for 30 dage"),
     ]
@@ -641,6 +641,9 @@ def init_db():
             "ALTER TABLE companies ADD COLUMN IF NOT EXISTS sales_type TEXT",
             "ALTER TABLE goals ADD COLUMN IF NOT EXISTS breakdown_proposal JSONB",
             "ALTER TABLE goals ADD COLUMN IF NOT EXISTS document_url TEXT",
+            "ALTER TABLE goals ADD COLUMN IF NOT EXISTS measure TEXT",
+            "UPDATE goals SET kind = 'strategisk', measure = 'dokument' WHERE kind = 'leverance'",
+            "UPDATE goals SET measure = CASE WHEN target_value IS NOT NULL THEN 'tal' ELSE 'milepaele' END WHERE measure IS NULL",
             "ALTER TABLE goals ADD COLUMN IF NOT EXISTS parent_goal_id INTEGER REFERENCES goals(id) ON DELETE SET NULL",
             "ALTER TABLE goal_milestones ADD COLUMN IF NOT EXISTS target_value REAL",
             "ALTER TABLE companies ADD COLUMN IF NOT EXISTS sales_phase TEXT",
@@ -2869,7 +2872,7 @@ class handler(BaseHTTPRequestHandler):
         sub = parts[3] if len(parts) > 3 else None
 
         GOAL_FIELDS = ["area", "kind", "title", "description", "owner_role", "company_id", "unit", "start_value",
-                       "target_value", "current_value", "start_date", "due_date", "status", "archived", "document_url", "parent_goal_id"]
+                       "target_value", "current_value", "start_date", "due_date", "status", "archived", "document_url", "parent_goal_id", "measure"]
         MEETING_FIELDS = ["area", "title", "meeting_date", "participants", "status", "summary", "next_meeting_date"]
         ACTION_FIELDS = ["meeting_id", "area", "goal_id", "company_id", "kind", "title", "owner", "due_date", "status",
                          "description", "checklist", "notes"]
@@ -2928,6 +2931,7 @@ class handler(BaseHTTPRequestHandler):
                 vals = {k: blank_to_none(body.get(k)) for k in GOAL_FIELDS if k in body}
                 if not vals.get("title"):
                     self._error(400, "Titel mangler"); return True
+                vals.setdefault("measure", "tal" if vals.get("target_value") is not None else "milepaele")
                 cols = list(vals.keys())
                 cur = db.execute(f"INSERT INTO goals ({','.join(cols)}) VALUES ({','.join(['%s'] * len(cols))}) RETURNING id",
                                  [vals[c] for c in cols])
@@ -2966,7 +2970,7 @@ class handler(BaseHTTPRequestHandler):
                                               + [a["title"] for a in self._action_rows(db, "AND a.goal_id = %s", (rid,))],
                            "i_dag": date.today().isoformat()}
                 system = (self._ai_preamble(db, g["area"]) +
-                          "\nOpgave: Et leverancemål (fx en strategi eller plan) er nået. Foreslå 3–7 konkrete ting, der skal ske nu, "
+                          "\nOpgave: Et mål, der måles på et dokument eller en beslutning (fx en strategi eller plan), er nået. Foreslå 3–7 konkrete ting, der skal ske nu, "
                           "så leverancen bliver til handling. Brug type 'drift' til målbare mål med tal og deadline (fx antal møder, leads, "
                           "omsætning, en hjemmeside live), og type 'opgave' til enkeltstående handlinger med en frist. Hvert punkt skal have en ejer "
                           "(CCO, COO, CFO eller CEO). Driftmål skal have et måltal og en enhed. Gentag ikke det, der findes allerede. Skriv kort og på dansk.")
@@ -3078,7 +3082,7 @@ class handler(BaseHTTPRequestHandler):
                 area = mtg["area"]
                 # Ledelsesmødet (tværgående) gennemgår tværgående mål og alle strategiske mål
                 if area == "tvaers":
-                    goal_where, gp = "AND NOT g.archived AND (g.area = 'tvaers' OR g.kind IN ('strategisk', 'leverance'))", None
+                    goal_where, gp = "AND NOT g.archived AND (g.area = 'tvaers' OR g.kind = 'strategisk')", None
                     act_where, ap = "", None
                 else:
                     goal_where, gp = "AND NOT g.archived AND g.area = %s", (area,)
@@ -3222,7 +3226,7 @@ class handler(BaseHTTPRequestHandler):
         goals = self._goal_rows(db, "AND NOT g.archived")
         for g in goals:
             gl = f"#/goals/{g['id']}"
-            if g.get("kind") == "leverance" and g["status"] == "done" and not g.get("children_total") and not g.get("actions_total"):
+            if g.get("measure") == "dokument" and g["status"] == "done" and not g.get("children_total") and not g.get("actions_total"):
                 add(f"goal-delivered-{g['id']}", "vigtig", g["area"], f"”{g['title']}” er leveret. Hvad sker der nu?",
                     "Der er ikke oprettet driftmål eller opgaver ud fra den endnu.", "Opret driftmål og opgaver", gl,
                     "En strategi eller plan skaber først værdi, når den bliver til mål og opgaver med en ejer.")

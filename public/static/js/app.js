@@ -1,4 +1,4 @@
-import { api } from './api.js?v=49';
+import { api } from './api.js?v=50';
 
 // ─── Constants ───
 const CATEGORY_LABELS = { opkald:'Opkald', tilbud:'Tilbud', moede:'Møde', opfølgning:'Opfølgning', demo:'Demo', kontrakt:'Kontrakt', implementering:'Implementering', support:'Support', faktura:'Fakturering', budget:'Budget', generelt:'Generelt' };
@@ -5327,6 +5327,16 @@ function reportStatusText(r) {
 }
 
 // Panel i mødets forberedelse: bed om, send og følg indrapporteringen
+// Sletter emnerne og laver dem igen ud fra kunder, sager og mål, som de ser ud nu
+async function rebuildReportRound(r) {
+    if (!confirm(`Lav spørgsmålene til ${r.respondent_name} forfra? De nuværende spørgsmål og dine rettelser forsvinder. Linket er det samme.`)) return;
+    try {
+        const nr = await api.rebuildReportRound(r.id);
+        if (nr.ai_questions) await runAiQuestionGeneration(r.id);
+        else location.hash = `#/reports/${r.id}`;
+    } catch (err) { alert(err.message); }
+}
+
 function reportPanel(m) {
     const box = h('div', { className: 'prep-agenda' }, h('div', { className: 'text-sm text-gray-400' }, 'Indlæser indrapportering…'));
     (async () => {
@@ -5353,6 +5363,7 @@ function reportPanel(m) {
                         h('span', { className: 'text-sm text-gray-500' }, 'Spørgsmålene skal godkendes, før linket virker')),
                     h('div', { className: 'flex gap-3 mt-2 text-sm' },
                         h('a', { href: `#/reports/${r.id}`, className: 'font-semibold text-blue-600 hover:underline' }, 'Gennemse og godkend spørgsmål \u2192'),
+                        h('button', { className: 'text-blue-600 hover:underline', onClick: () => rebuildReportRound(r) }, 'Lav forfra'),
                         h('button', { className: 'text-red-600 hover:underline', onClick: async () => {
                             if (confirm('Slet kladden?')) { await api.deleteReportRound(r.id); router(); }
                         } }, 'Slet'))));
@@ -5383,6 +5394,7 @@ function reportPanel(m) {
                     h('a', { href: link, target: '_blank', className: 'act-btn' }, 'Se som modtager')) : null,
                 h('div', { className: 'flex gap-3 mt-2 text-sm' },
                     h('a', { href: `#/reports/${r.id}`, className: 'font-semibold text-blue-600 hover:underline' }, answered ? 'Se svar & vurdering →' : 'Se svar indtil nu →'),
+                    !answered && !r.items_answered ? h('button', { className: 'text-blue-600 hover:underline', onClick: () => rebuildReportRound(r) }, 'Lav forfra') : null,
                     h('button', { className: 'text-red-600 hover:underline', onClick: async () => {
                         if (confirm('Slet indrapporteringen? Linket holder op med at virke.')) { await api.deleteReportRound(r.id); router(); }
                     } }, 'Slet'))));
@@ -5629,6 +5641,7 @@ function renderReportDraft(container, r) {
         h('div', {}, h('b', {}, 'Kladde. '), `Gennemse spørgsmålene til ${r.respondent_name}. Ret, slet eller tilføj, og godkend, når du er tilfreds. Først derefter virker linket.`),
         h('div', { className: 'flex gap-2 flex-shrink-0' },
             pending ? h('button', { className: 'act-btn', onClick: () => runAiQuestionGeneration(r.id) }, `Lav de sidste ${pending} med AI`) : null,
+            h('button', { className: 'act-btn', onClick: () => rebuildReportRound(r) }, 'Lav forfra'),
             h('button', { className: 'act-btn', onClick: async () => { await api.addReportItem(r.id, { title: 'Nyt emne', context: { questions: ['Nyt spørgsmål'], facts: [], ask_status: false, source_kind: 'manual' } }); router(); } }, '+ Emne'),
             h('button', { className: 'act-btn primary', onClick: async () => {
                 await api.updateReportRound(r.id, { status: 'open' });

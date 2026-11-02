@@ -264,6 +264,7 @@ export const api = {
     assessReportRound: (id) => request(`/report-rounds/${id}/assess`, { method: 'POST' }),
     updateReportRound: (id, data) => request(`/report-rounds/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
     deleteReportRound: (id) => request(`/report-rounds/${id}`, { method: 'DELETE' }),
+    rebuildReportRound: (id) => request(`/report-rounds/${id}/rebuild`, { method: 'POST' }),
     // CEO-assistent
     getAssistant: () => request('/ceo/assistant'),
     snoozeAssistant: (id, days = 7) => request('/ceo/assistant/snooze', { method: 'POST', body: JSON.stringify({ id, days }) }),

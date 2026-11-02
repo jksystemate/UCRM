@@ -3938,7 +3938,7 @@ class handler(BaseHTTPRequestHandler):
         for g in sorted(area_goals, key=lambda g: 0 if g["kind"] == "drift" else 1):
             ctx = {k: g.get(k) for k in ("kind", "unit", "start_value", "target_value", "current_value", "due_date",
                                           "status", "last_checkin", "last_comment", "milestones_total", "milestones_done", "start_date",
-                                          "description", "quality_missing")}
+                                          "description", "quality_missing", "measure")}
             nxt = db.execute("""SELECT title, due_date, target_value FROM goal_milestones WHERE goal_id = %s AND NOT done
                                 ORDER BY due_date ASC NULLS LAST LIMIT 1""", (g["id"],)).fetchone()
             if nxt:
@@ -3946,6 +3946,7 @@ class handler(BaseHTTPRequestHandler):
             prop = g.get("breakdown_proposal") or {}
             # Lederen nedbryder selv målet, indtil CEO'en har godkendt mindst 2 milepæle
             if (g.get("milestones_total") or 0) < 2 and (not prop or prop.get("rejected")):
+                ctx["breakdown_in_round"] = True
                 items.append(("breakdown", "goal", g["id"], g.get("company_id"), f"Nedbryd målet: {g['title']}",
                               {**ctx, "suggested": prop.get("rows") or _quarter_plan(g), "rejected_reason": prop.get("reason"),
                                "previous_drivers": prop.get("drivers")}))
@@ -4351,7 +4352,15 @@ class handler(BaseHTTPRequestHandler):
         return (f"Du hjælper CEO'en i Systemate med at følge op på {role}. Skriv på dansk, direkte og konkret, "
                 f"som en erfaren CEO der kender forretningen. I dag er {date.today().isoformat()}.\n\n"
                 f"CEO'ens beskrivelse af salgsprocessen og hvad CEO'en altid vil vide:\n{self._setting(db, 'sales_process', DEFAULT_SALES_PROCESS)}\n\n"
-                f"Andet CEO'en lægger vægt på:\n{self._setting(db, 'ceo_focus', '(intet angivet)')}\n")
+                f"Andet CEO'en lægger vægt på:\n{self._setting(db, 'ceo_focus', '(intet angivet)')}\n\n"
+                f"VIGTIGT: Lederen kan ikke se CEO'ens system. Lederen ser kun titel, facts og spørgsmål. Derfor:\n"
+                f"- Hvert emne skal kunne forstås alene. Nævn kunden, sagen eller målet med navn, og skriv målet ud "
+                f"(fx 'Sælg 150.000 målepunkter i 2027' i stedet for 'målet' eller '2027-målet').\n"
+                f"- facts skal forklare, hvad CEO'en ser og hvor det kommer fra, fx 'I mit overblik står tilbuddet som afleveret 3/11' "
+                f"eller 'Jeg har ingen noter om kontakt med kunden siden 1/10'. Skriv ikke systemord som 'registreret', 'pipeline-felt', "
+                f"'quality_missing', 'status not_started' eller id'er.\n"
+                f"- Antag ikke, at lederen kender CEO'ens tal, milepæle eller deadlines. Står de i data, så skriv dem i facts.\n"
+                f"- Spørg om det, lederen ved, og ikke om hvordan data er tastet ind.\n")
 
     def _generate_topics(self, db, rnd, items):
         """Omskriver skabelon-emner (kunde, mål, faste spørgsmål) til skarpe spørgsmål ud fra data."""
@@ -4370,7 +4379,9 @@ class handler(BaseHTTPRequestHandler):
             "- title: kort, fx 'EWII · Flow til EWII (3 mio. kr.)'.\n"
             "For mål: driftsmål (kortsigtede) handler om tal, fremdrift mod plan og hvad der skal til for at nå dem; "
             "strategiske mål (langsigtede) handler om næste milepæl, hvad der konkret er gjort siden sidst, og hvad der blokerer. "
-            "Er målet uklart (se quality_missing), så spørg ind til det, der mangler (fx måltal eller dato).\n"
+            "Er målet uklart (se quality_missing), så spørg ind til det, der mangler (fx måltal eller dato). "
+            "Har målet breakdown_in_round = true, nedbryder lederen det i milepæle på et andet kort, så spørg ikke om milepæle eller datoer for dem her. "
+            "Er measure = 'dokument', er målet nået, når et dokument eller en beslutning er godkendt (se description); spørg til indhold, fremdrift og hvad der mangler.\n"
             "Lav præcis ét emne pr. input-emne med samme subject_index.\n\n"
             + ANSWER_FORMAT_RULES)
         schema = {"type": "object", "additionalProperties": False, "required": ["topics"], "properties": {"topics": {
@@ -4703,6 +4714,21 @@ class handler(BaseHTTPRequestHandler):
                                             "source_kind": it["kind"], "source": it.get("context")}, default=_json_default), it["id"]))
             db.commit()
             self._json_response({"remaining": len(pending) - len(batch), "done": len(rnd["items"]) - len(pending) + len(batch)})
+        elif method == "POST" and sub == "rebuild":
+            # Lav emnerne forfra ud fra data, som de ser ud nu (fx efter oprydning i testdata). Kun før lederen har svaret.
+            rnd = self._round_full(db, rid)
+            if rnd.get("followup_of"):
+                self._error(409, "En opfølgning kan ikke laves forfra"); return True
+            if rnd["status"] not in ("draft", "open") or any(it.get("answer") for it in rnd["items"]):
+                self._error(409, "Lederen er begyndt at svare, så spørgsmålene kan ikke laves forfra"); return True
+            db.execute("DELETE FROM report_items WHERE round_id = %s", (rid,))
+            self._build_report_items(db, rid, rnd["area"], rnd.get("respondent_user_id"))
+            db.execute("UPDATE report_rounds SET status = %s, ai_generated_at = NULL WHERE id = %s",
+                       ("draft" if rnd.get("ai_questions") else "open", rid))
+            db.commit()
+            log_audit(db, uid, "update", "report_round", rid, "spørgsmål lavet forfra")
+            db.commit()
+            self._json_response(self._round_full(db, rid))
         elif method == "POST" and sub == "ai-patterns":
             rnd = self._round_full(db, rid)
             try:

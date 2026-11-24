@@ -1,4 +1,4 @@
-import { api } from './api.js?v=54';
+import { api } from './api.js?v=55';
 
 // ─── Constants ───
 const CATEGORY_LABELS = { opkald:'Opkald', tilbud:'Tilbud', moede:'Møde', opfølgning:'Opfølgning', demo:'Demo', kontrakt:'Kontrakt', implementering:'Implementering', support:'Support', faktura:'Fakturering', budget:'Budget', generelt:'Generelt' };
@@ -81,6 +81,10 @@ async function router() {
             await renderMeetingDetail(content, parseInt(parts[1]));
         } else if (parts[0] === 'meetings') {
             await renderMeetings(content);
+        } else if (parts[0] === 'finance' && parts[1]) {
+            await renderFinanceDetail(content, parseInt(parts[1]));
+        } else if (parts[0] === 'finance') {
+            await renderFinance(content);
         } else if (parts[0] === 'users') {
             await renderUsers(content);
         } else if (parts[0] === 'settings') {
@@ -859,6 +863,7 @@ function parseAmount(v) {
 }
 function formatAmount(n) {
     if (!n) return '0';
+    if (n < 0) return `-${formatAmount(-n)}`;
     if (n >= 1e6) return `${(n / 1e6).toLocaleString('da-DK', { maximumFractionDigits: 1 })} mio.`;
     if (n >= 1e3) return `${Math.round(n / 1e3).toLocaleString('da-DK')} t.`;
     return Math.round(n).toLocaleString('da-DK');
@@ -868,6 +873,168 @@ const AREA_ICONS = {
     leverance: 'M3 7h11v9H3zM14 10h4l3 3v3h-7M7.5 19a1.5 1.5 0 100-3 1.5 1.5 0 000 3zm10 0a1.5 1.5 0 100-3 1.5 1.5 0 000 3z',
     oekonomi: 'M12 21a9 9 0 100-18 9 9 0 000 18zm0-14v10m3-8.5c-.7-.9-1.8-1.5-3-1.5-1.7 0-3 1-3 2.3 0 3.2 6 1.6 6 4.7 0 1.3-1.3 2.5-3 2.5-1.3 0-2.4-.6-3-1.5',
 };
+
+const MONTHS_DA = ['januar', 'februar', 'marts', 'april', 'maj', 'juni', 'juli', 'august', 'september', 'oktober', 'november', 'december'];
+const monthLabel = mk => mk ? `${MONTHS_DA[parseInt(mk.slice(5, 7)) - 1]} ${mk.slice(0, 4)}` : '';
+const cap = t => t ? t[0].toUpperCase() + t.slice(1) : t;
+const kr = n => n == null ? '–' : Math.round(n).toLocaleString('da-DK');
+
+// ─── Økonomi: budget, saldobalance og AI-analyse ───
+// Læser en fil som base64, så den kan sendes som JSON
+const fileToBase64 = file => new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(String(r.result).split(',')[1]);
+    r.onerror = () => rej(r.error);
+    r.readAsDataURL(file);
+});
+
+async function renderFinance(container) {
+    container.innerHTML = '<div class="text-gray-400">Indlæser...</div>';
+    const [budget, balances] = await Promise.all([api.getFinanceBudget(), api.getFinanceBalances()]);
+    container.innerHTML = '';
+    container.className = 'ml-64 p-8 fade-in';
+    container.appendChild(h('div', { className: 'mb-6' },
+        h('h1', { className: 'text-2xl font-bold text-gray-900' }, 'Budget & regnskab'),
+        h('p', { className: 'text-gray-500 mt-1' }, 'Indlæs budgettet og månedens saldobalance fra e-conomic. Appen sammenligner med budgettet, og AI peger på afvigelser og ting, der undrer.')));
+
+    const status = h('div', { className: 'text-sm mt-2' });
+    const upload = (accept, label, onFile) => {
+        const inp = h('input', { type: 'file', accept, style: 'display:none' });
+        inp.addEventListener('change', async () => {
+            const f = inp.files[0]; if (!f) return;
+            status.className = 'text-sm mt-2 text-gray-600'; status.textContent = `Læser ${f.name}…`;
+            try { await onFile(f); } catch (err) { status.className = 'text-sm mt-2 text-red-600'; status.textContent = err.message; }
+            inp.value = '';
+        });
+        return h('label', { className: 'act-btn primary cursor-pointer' }, label, inp);
+    };
+
+    const monthIn = h('input', { type: 'month', className: 'border border-gray-300 rounded-lg px-2 py-1 text-sm', title: 'Kun nødvendigt, hvis måneden ikke står i filen' });
+    container.appendChild(h('div', { className: 'grid grid-cols-1 md:grid-cols-2 gap-4 mb-6' },
+        h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-5' },
+            h('div', { className: 'font-semibold text-gray-900 mb-1' }, 'Budget'),
+            budget ? h('div', { className: 'text-sm text-gray-600 mb-3' },
+                `${budget.filename || 'Budget'} · ${budget.accounts} konti · ${monthLabel(budget.first_month)} til ${monthLabel(budget.last_month)} · indlæst ${formatDate(budget.uploaded_at)}`)
+                : h('div', { className: 'text-sm text-gray-500 mb-3' }, 'Intet budget indlæst. Brug Excel-filen med fanen "Budget" (konti i rækker, måneder i kolonner).'),
+            upload('.xlsx,.xlsm', budget ? 'Indlæs ny version' : 'Indlæs budget (Excel)', async f => {
+                const r = await api.uploadFinanceBudget({ filename: f.name, data: await fileToBase64(f) });
+                status.className = 'text-sm mt-2 text-green-700'; status.textContent = `Budget indlæst: ${r.accounts} konti.`;
+                setTimeout(router, 800);
+            })),
+        h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-5' },
+            h('div', { className: 'font-semibold text-gray-900 mb-1' }, 'Saldobalance'),
+            h('div', { className: 'text-sm text-gray-500 mb-3' }, 'PDF fra e-conomic (Rapporter › Regnskab › Saldobalance for én måned), eller Excel/CSV med Nr., Navn, Perioden og År til dato. Indlæses samme måned igen, erstattes den gamle.'),
+            h('div', { className: 'flex items-center gap-3 flex-wrap' },
+                upload('.pdf,.xlsx,.csv', 'Indlæs saldobalance', async f => {
+                    const r = await api.uploadFinanceBalance({ filename: f.name, data: await fileToBase64(f), month: monthIn.value || null });
+                    location.hash = `#/finance/${r.id}`;
+                }),
+                h('label', { className: 'text-xs text-gray-500 flex items-center gap-2' }, 'Måned (valgfri)', monthIn)))));
+    container.appendChild(status);
+
+    const list = h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 mt-4' },
+        h('div', { className: 'px-5 py-3 border-b border-gray-100 font-semibold text-gray-900' }, 'Indlæste måneder'));
+    if (!balances.length) list.appendChild(h('div', { className: 'px-5 py-6 text-sm text-gray-400' }, 'Ingen saldobalancer endnu.'));
+    for (const b of balances) list.appendChild(h('a', { href: `#/finance/${b.id}`, className: 'flex items-center gap-3 px-5 py-3 border-b border-gray-100 last:border-0 hover:bg-gray-50' },
+        h('b', { className: 'text-gray-900' }, cap(monthLabel(String(b.period_end).slice(0, 7)))),
+        h('span', { className: 'text-sm text-gray-500' }, `${b.filename || ''} · ${b.lines} konti`),
+        h('span', { className: `ml-auto text-xs font-semibold ${b.analyzed_at ? 'text-green-700' : 'text-gray-400'}` }, b.analyzed_at ? 'Analyseret' : 'Ikke analyseret'), h('span', { className: 'text-gray-300' }, '→')));
+    container.appendChild(list);
+}
+
+async function renderFinanceDetail(container, id) {
+    container.innerHTML = '<div class="text-gray-400">Indlæser...</div>';
+    const d = await api.getFinanceBalance(id);
+    container.innerHTML = '';
+    container.className = 'ml-64 p-8 fade-in';
+    const devCell = (a, b) => {
+        if (b == null) return h('td', { className: 'fin-num text-gray-400' }, 'ikke budgetteret');
+        const dv = a - b, pct = b ? Math.round(dv / Math.abs(b) * 100) : null;
+        return h('td', { className: `fin-num ${Math.abs(dv) < 1 ? '' : dv > 0 ? 'fin-good' : 'fin-bad'}` }, `${dv > 0 ? '+' : ''}${kr(dv)}${pct != null && Math.abs(dv) >= 1 ? ` (${pct > 0 ? '+' : ''}${pct}%)` : ''}`);
+    };
+    container.appendChild(h('div', { className: 'mb-6' },
+        h('a', { href: '#/finance', className: 'text-sm text-blue-600 hover:underline mb-2 inline-block' }, '← Budget & regnskab'),
+        h('div', { className: 'flex items-center justify-between gap-3 flex-wrap' },
+            h('h1', { className: 'text-2xl font-bold text-gray-900' }, `${cap(monthLabel(d.month))} mod budget`),
+            h('button', { className: 'text-sm text-red-600 hover:underline', onClick: async () => {
+                if (confirm('Slet denne saldobalance og dens analyse?')) { await api.deleteFinanceBalance(id); location.hash = '#/finance'; }
+            } }, 'Slet')),
+        h('p', { className: 'text-gray-500 mt-1' }, d.has_budget
+            ? (d.budget_covers_month ? `Sammenlignet med ${d.budget_file || 'budgettet'}. Positiv afvigelse er bedre end budget (mere indtægt eller færre omkostninger).` : 'Budgettet dækker ikke denne måned.')
+            : 'Der er ikke indlæst et budget, så der vises kun faktiske tal.')));
+
+    // AI-analyse
+    const ai = h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6 fin-ai' });
+    const drawAi = (an) => {
+        ai.innerHTML = '';
+        const btn = h('button', { className: 'act-btn primary', onClick: async () => {
+            btn.disabled = true; btn.textContent = 'Analyserer… (op til et minut)';
+            try { const r = await api.analyzeFinanceBalance(id); d.analysis = r.analysis; d.analyzed_at = r.analyzed_at; drawAi(r.analysis); }
+            catch (err) { alert(err.message); btn.disabled = false; btn.textContent = an ? 'Analysér igen' : '✦ Analysér med AI'; }
+        } }, an ? 'Analysér igen' : '✦ Analysér med AI');
+        ai.append(h('div', { className: 'flex items-center justify-between gap-3 mb-2' },
+            h('div', { className: 'font-semibold text-gray-900' }, '✦ AI: afvigelser og fokuspunkter'), btn));
+        if (!an) { ai.append(h('p', { className: 'text-sm text-gray-500' }, 'AI gennemgår afvigelser fra budget, konti uden budget, usædvanlige poster og bevægelser i balancen, og foreslår spørgsmål til CFO.')); return; }
+        ai.append(h('p', { className: 'text-gray-800 mb-3' }, an.summary));
+        const SEV = { kritisk: 'Kritisk', vigtig: 'Vigtigt', info: 'Info' };
+        ai.append(h('div', { className: 'space-y-2 mb-3' }, ...(an.focus || []).map(f => h('div', { className: `fin-focus sev-${f.severity}` },
+            h('div', { className: 'flex items-center gap-2' }, h('span', { className: `fin-sev sev-${f.severity}` }, SEV[f.severity] || f.severity), h('b', {}, f.title)),
+            h('div', { className: 'text-sm text-gray-700 mt-1' }, f.detail),
+            (f.accounts || []).length ? h('div', { className: 'text-xs text-gray-400 mt-1' }, `Konti: ${f.accounts.join(', ')}`) : null))));
+        if ((an.questions_for_cfo || []).length) ai.append(h('div', {},
+            h('div', { className: 'text-sm font-semibold text-gray-900 mb-1' }, 'Spørgsmål til CFO'),
+            h('ul', { className: 'list-disc pl-5 text-sm text-gray-700 space-y-1' }, ...an.questions_for_cfo.map(q => h('li', {}, q)))));
+        if (d.analyzed_at) ai.append(h('div', { className: 'text-xs text-gray-400 mt-3' }, `Analyseret ${formatDate(d.analyzed_at)}`));
+    };
+    drawAi(d.analysis);
+    container.appendChild(ai);
+
+    // Resultatopgørelse pr. gruppe
+    const cum = !!d.cum_from;
+    const rowsFor = list => list.map(g => h('tr', { className: ['db', 'ebitda', 'ebit', 'rfs'].includes(g.key) ? 'fin-total' : '' },
+        h('td', {}, g.label), h('td', { className: 'fin-num' }, kr(g.actual)), h('td', { className: 'fin-num' }, d.has_budget ? kr(g.budget) : '–'),
+        d.has_budget ? devCell(g.actual, g.budget) : h('td', {}),
+        ...(cum ? [h('td', { className: 'fin-num' }, kr(g.cum_actual)), devCell(g.cum_actual, g.cum_budget)] : []),
+        h('td', { className: 'fin-num text-gray-500' }, kr(g.ytd))));
+    const order = ['omsaetning', 'direkte', 'db', 'personale', 'lokaler', 'salg', 'admin', 'ebitda', 'afskrivninger', 'ebit', 'finans', 'rfs'];
+    const all = [...d.groups, ...d.totals];
+    container.appendChild(h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6 overflow-x-auto' },
+        h('div', { className: 'font-semibold text-gray-900 mb-3' }, 'Resultat'),
+        h('table', { className: 'fin-table' },
+            h('thead', {}, h('tr', {}, h('th', {}, ''), h('th', {}, monthLabel(d.month)), h('th', {}, 'Budget'), h('th', {}, 'Afvigelse'),
+                ...(cum ? [h('th', {}, `Fra ${monthLabel(d.cum_from)}`), h('th', {}, 'Afvigelse')] : []), h('th', {}, 'År til dato'))),
+            h('tbody', {}, ...rowsFor(order.map(k => all.find(g => g.key === k)).filter(Boolean))))));
+
+    // Konti med størst afvigelse
+    const accs = d.accounts.filter(a => Math.abs(a.dev) >= 1 || !a.budgeted).sort((a, b) => Math.abs(b.dev) - Math.abs(a.dev));
+    const accBody = h('tbody', {});
+    let showAll = false;
+    const drawAcc = () => {
+        accBody.innerHTML = '';
+        for (const a of (showAll ? accs : accs.slice(0, 15))) accBody.appendChild(h('tr', {},
+            h('td', { className: 'text-gray-400' }, String(a.account)), h('td', {}, a.name),
+            h('td', { className: 'fin-num' }, kr(a.actual)), h('td', { className: 'fin-num' }, a.budget == null ? '–' : kr(a.budget)),
+            a.budgeted ? devCell(a.actual, a.budget) : h('td', { className: 'fin-num text-orange-600' }, 'ikke budgetteret'),
+            h('td', { className: 'fin-num text-gray-500' }, kr(a.ytd))));
+    };
+    drawAcc();
+    const more = h('button', { className: 'text-sm text-blue-600 hover:underline mt-2', onClick: () => { showAll = !showAll; more.textContent = showAll ? 'Vis færre' : `Vis alle ${accs.length}`; drawAcc(); } }, `Vis alle ${accs.length}`);
+    container.appendChild(h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6 overflow-x-auto' },
+        h('div', { className: 'font-semibold text-gray-900 mb-3' }, 'Konti med størst afvigelse'),
+        h('table', { className: 'fin-table' },
+            h('thead', {}, h('tr', {}, h('th', {}, 'Nr.'), h('th', {}, 'Konto'), h('th', {}, monthLabel(d.month)), h('th', {}, 'Budget'), h('th', {}, 'Afvigelse'), h('th', {}, 'År til dato'))),
+            accBody), accs.length > 15 ? more : null));
+
+    // Balance og likviditet
+    const liq = Object.entries(d.liquidity_forecast || {}).slice(0, 6);
+    container.appendChild(h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6' },
+        h('div', { className: 'font-semibold text-gray-900 mb-3' }, 'Balance ultimo'),
+        h('div', { className: 'grid grid-cols-2 md:grid-cols-4 gap-3' }, ...d.balance.map(b => h('div', { className: 'fin-bal', title: b.accounts.map(a => `${a.account} ${a.name}: ${kr(a.end)}`).join('\n') },
+            h('div', { className: 'text-xs text-gray-500' }, b.label), h('div', { className: 'text-lg font-bold text-gray-900' }, kr(b.end)),
+            h('div', { className: `text-xs ${b.change > 0 ? 'text-gray-600' : 'text-gray-600'}` }, `${b.change > 0 ? '+' : ''}${kr(b.change)} i måneden`)))),
+        liq.length ? h('div', { className: 'text-sm text-gray-600 mt-4' }, h('b', {}, 'Likviditetsprognose fra budgettet: '),
+            liq.map(([m, v]) => `${MONTHS_DA[parseInt(m.slice(5)) - 1].slice(0, 3)} ${kr(v)}`).join(' · ')) : null));
+}
 
 function renderCeoOverview(d, ceo) {
     const wrap = h('div', {});
@@ -894,8 +1061,7 @@ function renderCeoOverview(d, ceo) {
     const overdueTenders = tenders.filter(t => t.deadline && t.deadline < today);
     const pipeline = tenders.reduce((sum, t) => sum + parseAmount(t.estimated_value), 0);
     const won = summary.filter(t => t.status === 'won');
-    const lost = summary.filter(t => t.status === 'lost' || t.status === 'dropped');
-    const wonValue = won.reduce((sum, t) => sum + parseAmount(t.estimated_value), 0);
+    const lost = summary.filter(t => t.status === 'lost');  // droppede tilbud tæller ikke med i hitraten
     const decided = won.length + lost.length;
     const hitRate = decided ? Math.round(won.length / decided * 100) : null;
 
@@ -912,35 +1078,58 @@ function renderCeoOverview(d, ceo) {
 
     const kpi = (v, l, sub, cls, href) => h('a', { className: `kpi ${cls || ''}`, href: href || '#/' },
         h('div', { className: 'kpi-v' }, v), h('div', { className: 'kpi-l' }, l), h('div', { className: 'kpi-s' }, sub));
-    const areaCol = (key, label, tiles) => h('div', { className: 'ov-area' },
+    const areaCol = (key, label, tiles, extraLine) => h('div', { className: 'ov-area' },
         h('a', { className: 'ov-area-head', href: `#/area/${key}` },
             h('span', { className: 'ov-ic', style: `background:var(--area-${key}-soft);color:var(--area-${key})`,
                 innerHTML: `<svg fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="${AREA_ICONS[key]}"/></svg>` }),
             AREA_LABELS[key],
             h('span', { className: 'ov-go' }, 'Åbn →')),
         h('div', { className: 'ov-label' }, label),
-        h('div', { className: 'kpi-grid' }, ...tiles));
+        h('div', { className: 'kpi-grid' }, ...tiles),
+        extraLine || null);
 
+    // Hver kolonne viser, hvad der er i fokus for lederen af området: mål, opgaver, ledermøde og indrapportering
     const A = byArea;
+    const short = d => d ? new Date(String(d).slice(0, 10) + 'T12:00').toLocaleDateString('da-DK', { day: 'numeric', month: 'short' }) : '';
+    const focusTiles = (key) => {
+        if (!ceo) return [];
+        const role = AREA_ROLE[key];
+        const goals = (ceo.goals || []).filter(g => g.area === key && g.status !== 'done');
+        const on = goals.filter(g => g.status === 'on_track').length, risk = goals.filter(g => g.status === 'at_risk').length,
+              off = goals.filter(g => g.status === 'off_track').length, unk = goals.length - on - risk - off;
+        const acts = (ceo.open_actions || []).filter(x => x.kind === 'aktion' && (x.area === key || (x.owner || '').toUpperCase().startsWith(role)));
+        const late = acts.filter(x => x.due_date && x.due_date < today).length;
+        const next = (ceo.planned_meetings || []).find(m => m.area === key);
+        const last = (ceo.last_meetings || []).find(m => m.area === key);
+        const rep = (ceo.reports || {})[key];
+        let repTile;
+        if (!rep) repTile = kpi('–', 'Indrapportering', 'ikke bedt om endnu', '', '#/meetings');
+        else if (rep.status === 'draft') repTile = kpi('Kladde', 'Indrapportering', 'spørgsmål ikke godkendt', 'warn', `#/reports/${rep.id}`);
+        else if (rep.status === 'open') repTile = kpi('Afventer', 'Indrapportering', rep.sent_at ? `sendt ${short(rep.sent_at)}` : 'linket er ikke sendt', 'warn', `#/reports/${rep.id}`);
+        else repTile = kpi(short(rep.submitted_at), 'Seneste indrapportering', rep.reviewed_at ? 'gennemset' : 'ny, ikke gennemset', rep.reviewed_at ? 'good' : 'warn', `#/reports/${rep.id}`);
+        return [
+            kpi(goals.length ? `${on}/${goals.length}` : '–', 'Mål på sporet',
+                goals.length ? [risk && `${risk} i risiko`, off && `${off} bagud`, unk && `${unk} ikke vurderet`].filter(Boolean).join(' · ') || 'alle på sporet' : 'ingen mål',
+                off ? 'bad' : risk ? 'warn' : goals.length && on === goals.length ? 'good' : '', '#/goals'),
+            kpi(String(acts.length), 'Åbne opgaver', late ? `${late} over frist` : 'ingen over frist', late ? 'bad' : '', '#/todo'),
+            kpi(next ? short(next.meeting_date) : '–', 'Næste ledermøde', last ? `sidst ${short(last.meeting_date)}` : 'intet holdt endnu', next ? '' : 'bad', next ? `#/meetings/${next.id}` : '#/meetings'),
+            repTile,
+        ];
+    };
+    const extra = (href, ...parts) => h('a', { className: 'ov-extra', href }, ...parts);
+    const fin = ceo?.finance || {};
+    const finLine = fin.month
+        ? extra(`#/finance/${fin.id}`, h('b', {}, `${cap(monthLabel(fin.month))}: `),
+            `EBITDA ${formatAmount(fin.ebitda)}`, fin.ebitda_budget != null ? ` mod budget ${formatAmount(fin.ebitda_budget)}` : '',
+            fin.analyzed ? ` · ${fin.focus} fokuspunkter${fin.critical ? ` (${fin.critical} kritiske)` : ''}` : ' · ikke analyseret endnu', ' →')
+        : extra('#/finance', fin.has_budget ? 'Budget indlæst. Indlæs en saldobalance for at se afvigelser →' : 'Indlæs budget og saldobalance for at se afvigelser →');
     wrap.appendChild(h('div', { className: 'ov-areas' },
-        areaCol('salg', 'Pipeline & opfølgning', [
-            kpi(String(tenders.length), 'Aktive tilbud', overdueTenders.length ? `${overdueTenders.length} over deadline` : 'alle inden for deadline', overdueTenders.length ? 'warn' : '', '#/tenders'),
-            kpi(formatAmount(pipeline), 'Pipeline', 'kr. i aktive tilbud', '', '#/tenders'),
-            kpi(String(A.salg.open), 'Åbne sager', `${A.salg.companies} virksomheder`, '', '#/area/salg'),
-            kpi(String(A.salg.overdue), 'Forfaldne', 'kræver opfølgning', A.salg.overdue ? 'bad' : 'good', '#/area/salg'),
-        ]),
-        areaCol('leverance', 'Kunder & drift', [
-            kpi(String(won.length), 'Vundne aftaler', 'kunder i leverance', 'good', '#/tenders'),
-            kpi(String(A.leverance.open), 'Åbne sager', `${A.leverance.companies} virksomheder`, '', '#/area/leverance'),
-            kpi(String(A.leverance.overdue), 'Forfaldne', 'frist overskredet', A.leverance.overdue ? 'bad' : 'good', '#/area/leverance'),
-            kpi(String(A.leverance.done30), 'Løst', 'seneste 30 dage', '', '#/area/leverance'),
-        ]),
-        areaCol('oekonomi', 'Resultat & opfølgning', [
-            kpi(formatAmount(wonValue), 'Vundet værdi', 'kr. i vundne tilbud', 'good', '#/tenders'),
-            kpi(hitRate == null ? '–' : `${hitRate}%`, 'Hitrate', `${won.length} vundet · ${lost.length} tabt`, '', '#/tenders'),
-            kpi(String(A.oekonomi.open), 'Åbne sager', `${A.oekonomi.companies} virksomheder`, '', '#/area/oekonomi'),
-            kpi(String(A.oekonomi.overdue), 'Forfaldne', 'frist overskredet', A.oekonomi.overdue ? 'bad' : 'good', '#/area/oekonomi'),
-        ])
+        areaCol('salg', `I fokus for ${AREA_ROLE.salg}`, focusTiles('salg'),
+            extra('#/tenders', h('b', {}, 'Pipeline: '), `${tenders.length} aktive tilbud · ${formatAmount(pipeline)} kr.`,
+                hitRate == null ? '' : ` · hitrate ${hitRate}%`, overdueTenders.length ? ` · ${overdueTenders.length} over deadline` : '', ' →')),
+        areaCol('leverance', `I fokus for ${AREA_ROLE.leverance}`, focusTiles('leverance'),
+            extra('#/area/leverance', h('b', {}, 'Kundesager: '), `${A.leverance.open} åbne · ${A.leverance.overdue} forfaldne · ${A.leverance.done30} løst seneste 30 dage →`)),
+        areaCol('oekonomi', `I fokus for ${AREA_ROLE.oekonomi}`, focusTiles('oekonomi'), finLine)
     ));
 
     if (ceo) wrap.appendChild(renderGoalsStrip(ceo));

@@ -160,6 +160,14 @@ export const api = {
 
     // SystemateCEO: mål, ledermøder og aktioner
     getCeoOverview: () => request('/ceo/overview'),
+    // Økonomi: budget og saldobalance
+    getFinanceBudget: () => request('/finance/budget'),
+    uploadFinanceBudget: (data) => request('/finance/budget', { method: 'POST', body: JSON.stringify(data) }),
+    getFinanceBalances: () => request('/finance/balances'),
+    getFinanceBalance: (id) => request(`/finance/balances/${id}`),
+    uploadFinanceBalance: (data) => request('/finance/balances', { method: 'POST', body: JSON.stringify(data) }),
+    analyzeFinanceBalance: (id) => request(`/finance/balances/${id}/analyze`, { method: 'POST' }),
+    deleteFinanceBalance: (id) => request(`/finance/balances/${id}`, { method: 'DELETE' }),
     getGoals: (params = {}) => {
         const qs = new URLSearchParams(params).toString();
         return request(`/goals${qs ? '?' + qs : ''}`);

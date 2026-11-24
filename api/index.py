@@ -6,6 +6,7 @@ from email import policy as email_policy
 from email.utils import parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
+import re
 from datetime import date, datetime, timedelta
 
 import psycopg2
@@ -150,6 +151,124 @@ def _next_due(due, recurrence, today=None):
     while nxt < today:
         nxt = _add_months(nxt, months)
     return nxt
+
+
+# ─── Økonomi: budget og saldobalance ───
+# Kontoplanens grupper (e-conomic standard). Totalerne regnes ud fra grupperne.
+FIN_GROUPS = [("omsaetning", "Omsætning", 10000, 12999), ("direkte", "Direkte omkostninger", 13000, 14999),
+              ("personale", "Personaleomkostninger", 15000, 15999), ("lokaler", "Lokaleomkostninger", 16000, 16999),
+              ("salg", "Salgsomkostninger", 17000, 17999), ("admin", "Administrationsomkostninger", 18000, 19999),
+              ("afskrivninger", "Af- og nedskrivninger", 20000, 21999), ("finans", "Finansielle poster", 22000, 23999),
+              ("skat", "Selskabsskat", 24000, 29999)]
+FIN_TOTALS = [("db", "Dækningsbidrag", ["omsaetning", "direkte"]),
+              ("ebitda", "Resultat før afskrivninger (EBITDA)", ["omsaetning", "direkte", "personale", "lokaler", "salg", "admin"]),
+              ("ebit", "Resultat før renter (EBIT)", ["omsaetning", "direkte", "personale", "lokaler", "salg", "admin", "afskrivninger"]),
+              ("rfs", "Resultat før skat", ["omsaetning", "direkte", "personale", "lokaler", "salg", "admin", "afskrivninger", "finans"])]
+# Balanceposter, der altid vises (kontointervaller)
+FIN_BALANCE = [("likvider", "Likvide beholdninger", 58000, 58999), ("debitorer", "Debitorer", 56000, 56099),
+               ("igangv", "Igangværende arbejder", 56100, 56199), ("mellemregning", "Mellemregninger (koncern)", 56700, 56899),
+               ("kreditorer", "Kreditorer", 68000, 68099), ("moms", "Moms og afgifter", 69000, 69199),
+               ("ferie", "Feriepenge og flexsaldo", 69450, 69599), ("egenkapital", "Egenkapital", 61000, 61999)]
+
+
+def _fin_group(acc):
+    return next((k for k, _, lo, hi in FIN_GROUPS if lo <= acc <= hi), None)
+
+
+def _da_number(txt):
+    """'-1.234.567,89' → -1234567.89"""
+    return float(str(txt).replace(".", "").replace(",", ".").replace("\xa0", "").strip())
+
+
+def _month_key(v):
+    """Datoceller og tekster som '29-02-2029' → '2029-02'."""
+    if hasattr(v, "year"):
+        return f"{v.year:04d}-{v.month:02d}"
+    m = re.match(r"^(\d{4})-(\d{2})", str(v)) or None
+    if m:
+        return f"{m.group(1)}-{m.group(2)}"
+    m = re.match(r"^(\d{1,2})-(\d{1,2})-(\d{4})$", str(v).strip())
+    return f"{m.group(3)}-{int(m.group(2)):02d}" if m else None
+
+
+def parse_budget_xlsx(data):
+    """Læser fanen 'Budget' (konti i rækker, måneder i kolonner) og evt. 'Likviditet' (likvidbeholdning pr. måned)."""
+    import io, openpyxl
+    wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
+    ws = wb["Budget"] if "Budget" in wb.sheetnames else wb.worksheets[0]
+    rows = list(ws.iter_rows(values_only=True))
+    head_idx = next(i for i, r in enumerate(rows[:10]) if sum(1 for v in r if _month_key(v)) >= 3)
+    cols = {i: _month_key(v) for i, v in enumerate(rows[head_idx]) if _month_key(v)}
+    accounts = {}
+    for r in rows[head_idx + 1:]:
+        if not r or r[0] is None or not re.fullmatch(r"\s*\d{4,6}\s*", str(r[0])):
+            continue
+        acc = int(str(r[0]).strip())
+        a = accounts.setdefault(str(acc), {"name": str(r[1] or "").strip(), "months": {}})
+        for i, mk in cols.items():
+            v = r[i] if i < len(r) else None
+            if isinstance(v, (int, float)):
+                a["months"][mk] = round(a["months"].get(mk, 0) + float(v), 2)
+    liquidity = {}
+    if "Likviditet" in wb.sheetnames:
+        lr = list(wb["Likviditet"].iter_rows(values_only=True))
+        lcols = {i: _month_key(v) for i, v in enumerate(lr[0]) if _month_key(v)}
+        ending = [r for r in lr if r and str(r[0] or "").lower().startswith("likvidbeholdning")]
+        if ending:
+            for i, mk in lcols.items():
+                v = ending[-1][i] if i < len(ending[-1]) else None
+                if isinstance(v, (int, float)):
+                    liquidity[mk] = round(float(v), 2)
+    months = sorted({m for a in accounts.values() for m in a["months"]})
+    if not accounts or not months:
+        raise ValueError("Fandt ingen konti med beløb pr. måned. Er det fanen 'Budget' med kontonumre i kolonne A?")
+    return {"accounts": accounts, "liquidity": liquidity, "first_month": months[0], "last_month": months[-1]}
+
+
+def parse_balance(filename, data):
+    """Saldobalance fra e-conomic: PDF eller Excel/CSV med Nr., Navn, Perioden, År til dato."""
+    import io
+    lines, period = [], None
+    amt = r"(-?[\d.]+,\d{2})"
+    if filename.lower().endswith(".pdf"):
+        from pypdf import PdfReader
+        text = "\n".join(p.extract_text() or "" for p in PdfReader(io.BytesIO(data)).pages)
+        m = re.search(r"perioden\s+(\d{2})\.(\d{2})\.(\d{2,4})\s*-\s*(\d{2})\.(\d{2})\.(\d{2,4})", text)
+        if m:
+            y1, y2 = m.group(3), m.group(6)
+            y1 = int(y1) + (2000 if len(y1) == 2 else 0); y2 = int(y2) + (2000 if len(y2) == 2 else 0)
+            period = (date(y1, int(m.group(2)), int(m.group(1))), date(y2, int(m.group(5)), int(m.group(4))))
+        pending = None
+        for raw in text.split("\n"):
+            ln = raw.replace("\xa0", " ").strip()
+            if pending and not re.match(r"^\d{4,6} ", ln):
+                ln = pending + " " + ln; pending = None
+            mm = re.match(rf"^(\d{{4,6}}) (.+?) {amt} {amt}$", ln)
+            if mm:
+                lines.append({"account": int(mm.group(1)), "name": mm.group(2).strip(),
+                              "period": _da_number(mm.group(3)), "ytd": _da_number(mm.group(4))})
+                pending = None
+            elif re.match(r"^\d{4,6} \D", ln):
+                pending = ln
+    else:
+        import csv
+        if filename.lower().endswith((".xlsx", ".xlsm")):
+            import openpyxl
+            ws = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True).worksheets[0]
+            table = [list(r) for r in ws.iter_rows(values_only=True)]
+        else:
+            txt = data.decode("utf-8-sig", errors="replace")
+            table = list(csv.reader(io.StringIO(txt), delimiter=";" if txt.count(";") > txt.count(",") else ","))
+        for r in table:
+            if len(r) >= 4 and r[0] is not None and re.fullmatch(r"\s*\d{4,6}\s*", str(r[0])):
+                try:
+                    num = lambda v: float(v) if isinstance(v, (int, float)) else _da_number(v)
+                    lines.append({"account": int(str(r[0]).strip()), "name": str(r[1] or "").strip(), "period": num(r[2]), "ytd": num(r[3])})
+                except (ValueError, TypeError):
+                    continue
+    if not lines:
+        raise ValueError("Fandt ingen konti i filen. Brug saldobalancen fra e-conomic (PDF) eller en Excel/CSV med Nr., Navn, Perioden og År til dato.")
+    return {"lines": lines, "period": period}
 
 
 def _goal_needs_status(g):
@@ -635,6 +754,25 @@ def init_db():
             )""",
             "ALTER TABLE tenders ADD COLUMN IF NOT EXISTS purchase_route TEXT DEFAULT 'selv'",
             "ALTER TABLE tenders ADD COLUMN IF NOT EXISTS sales_type TEXT",
+            """CREATE TABLE IF NOT EXISTS finance_budgets (
+                id SERIAL PRIMARY KEY,
+                filename TEXT,
+                data JSONB NOT NULL,
+                first_month TEXT,
+                last_month TEXT,
+                uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS finance_balances (
+                id SERIAL PRIMARY KEY,
+                filename TEXT,
+                period_start DATE,
+                period_end DATE NOT NULL,
+                lines JSONB NOT NULL,
+                analysis JSONB,
+                analysis_model TEXT,
+                analyzed_at TIMESTAMP,
+                uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
             "ALTER TABLE tenders ADD COLUMN IF NOT EXISTS phase TEXT",
             "ALTER TABLE tenders ADD COLUMN IF NOT EXISTS phase_changed_at TIMESTAMP",
             """CREATE TABLE IF NOT EXISTS tender_phase_log (
@@ -2409,6 +2547,180 @@ class handler(BaseHTTPRequestHandler):
             db.close()
 
     # ─── SystemateCEO: mål, ledermøder og aktioner ───
+    # ─── Økonomi: budget, saldobalance og AI-analyse ───
+    def _fin_compare(self, db, bal):
+        """Sammenligner én saldobalance med budgettet: grupper, totaler, konti og balanceposter."""
+        budget_row = db.execute("SELECT id, data, first_month, last_month, filename FROM finance_budgets ORDER BY id DESC LIMIT 1").fetchone()
+        budget = (budget_row["data"] if budget_row else {}) or {}
+        bacc = budget.get("accounts") or {}
+        mk = bal["period_end"].strftime("%Y-%m")
+        year = bal["period_end"].year
+        # Faktisk pr. måned fra alle indlæste saldobalancer (til akkumuleret sammenligning siden budgettets start)
+        months_actual = {}
+        for r in db.execute("SELECT period_end, lines FROM finance_balances ORDER BY period_end").fetchall():
+            months_actual[r["period_end"].strftime("%Y-%m")] = {l["account"]: l["period"] for l in r["lines"]}
+        start = max(f"{year}-01", (budget_row["first_month"] if budget_row else mk) or mk)
+        span = []
+        y, m = int(start[:4]), int(start[5:])
+        while f"{y:04d}-{m:02d}" <= mk:
+            span.append(f"{y:04d}-{m:02d}"); m += 1
+            if m > 12: y, m = y + 1, 1
+        cum_ok = bool(budget_row) and all(x in months_actual for x in span)
+
+        def bud(acc, months):
+            a = bacc.get(str(acc)) or {}
+            vals = [a.get("months", {}).get(x) for x in months]
+            return sum(v for v in vals if v is not None) if any(v is not None for v in vals) else None
+
+        accounts = []
+        names = {int(k): v["name"] for k, v in bacc.items()}
+        actual = {l["account"]: l for l in bal["lines"]}
+        for acc in sorted(set(actual) | {a for a in names if a < 50000}):
+            if acc >= 50000:
+                continue
+            l = actual.get(acc) or {"period": 0.0, "ytd": 0.0, "name": names.get(acc, "")}
+            b = bud(acc, [mk])
+            row = {"account": acc, "name": l.get("name") or names.get(acc, ""), "group": _fin_group(acc),
+                   "actual": l["period"], "budget": b, "ytd": l["ytd"], "budgeted": str(acc) in bacc}
+            if cum_ok:
+                row["cum_actual"] = sum(months_actual[x].get(acc, 0) for x in span)
+                row["cum_budget"] = bud(acc, span)
+            row["dev"] = round(row["actual"] - (b or 0), 2)
+            accounts.append(row)
+
+        def total(keys, field):
+            vals = [a.get(field) for a in accounts if a["group"] in keys]
+            return round(sum(v for v in vals if v is not None), 2)
+        groups = [{"key": k, "label": lbl, "actual": total([k], "actual"), "budget": total([k], "budget"), "ytd": total([k], "ytd"),
+                   **({"cum_actual": total([k], "cum_actual"), "cum_budget": total([k], "cum_budget")} if cum_ok else {})}
+                  for k, lbl, _, _ in FIN_GROUPS]
+        totals = [{"key": k, "label": lbl, "actual": total(ks, "actual"), "budget": total(ks, "budget"), "ytd": total(ks, "ytd"),
+                   **({"cum_actual": total(ks, "cum_actual"), "cum_budget": total(ks, "cum_budget")} if cum_ok else {})}
+                  for k, lbl, ks in FIN_TOTALS]
+        balance = []
+        for k, lbl, lo, hi in FIN_BALANCE:
+            ls = [l for l in bal["lines"] if lo <= l["account"] <= hi]
+            if ls:
+                balance.append({"key": k, "label": lbl, "end": round(sum(l["ytd"] for l in ls), 2),
+                                "change": round(sum(l["period"] for l in ls), 2),
+                                "accounts": [{"account": l["account"], "name": l["name"], "end": l["ytd"], "change": l["period"]} for l in ls]})
+        liq = budget.get("liquidity") or {}
+        return {"month": mk, "has_budget": bool(budget_row), "budget_file": budget_row["filename"] if budget_row else None,
+                "budget_covers_month": any(mk in (a.get("months") or {}) for a in bacc.values()),
+                "cum_from": span[0] if cum_ok else None, "groups": groups, "totals": totals, "accounts": accounts, "balance": balance,
+                "liquidity_forecast": {m: v for m, v in sorted(liq.items()) if m > mk}}
+
+    def _fin_summary(self, db):
+        """Kort status til Overblik: seneste saldobalance mod budget og antal fokuspunkter."""
+        bal = db.execute("SELECT * FROM finance_balances ORDER BY period_end DESC, id DESC LIMIT 1").fetchone()
+        if not bal:
+            return {"has_budget": bool(db.execute("SELECT 1 FROM finance_budgets LIMIT 1").fetchone())}
+        cmp_ = self._fin_compare(db, dict(bal))
+        eb = next(t for t in cmp_["totals"] if t["key"] == "ebitda")
+        a = bal["analysis"] or {}
+        return {"has_budget": cmp_["has_budget"], "id": bal["id"], "month": cmp_["month"], "ebitda": eb["actual"], "ebitda_budget": eb["budget"],
+                "analyzed": bool(a), "focus": len(a.get("focus") or []), "critical": sum(1 for f in a.get("focus") or [] if f.get("severity") == "kritisk")}
+
+    def _fin_analyze(self, db, bal, cmp_):
+        """AI gennemgår afvigelser, mærkelige poster og balancen og foreslår fokuspunkter og spørgsmål til CFO."""
+        big = sorted([a for a in cmp_["accounts"] if abs(a["dev"]) >= 25000 or (not a["budgeted"] and abs(a["actual"]) >= 10000)],
+                     key=lambda a: -abs(a["dev"]))[:30]
+        payload = {"måned": cmp_["month"], "budgetfil": cmp_["budget_file"], "budget_dækker_måneden": cmp_["budget_covers_month"],
+                   "akkumuleret_fra": cmp_["cum_from"],
+                   "grupper": cmp_["groups"], "totaler": cmp_["totals"],
+                   "største_afvigelser_pr_konto": big,
+                   "balance": [{k: v for k, v in b.items() if k != "accounts"} | {"konti": b["accounts"]} for b in cmp_["balance"]],
+                   "likviditetsprognose_fra_budget": cmp_["liquidity_forecast"]}
+        system = ("Du er en erfaren økonomichef, der hjælper CEO'en i Systemate (konsulenthus + softwareproduktet Settl) med at læse månedens tal. "
+                  f"I dag er {date.today().isoformat()}. Skriv på dansk, kort og konkret, med beløb i kr. (fx 1,2 mio. kr. eller 340.000 kr.).\n"
+                  "Fortegn: indtægter er positive, omkostninger negative. 'actual' er måneden, 'ytd' år til dato, 'budget' er månedens budget, "
+                  "'cum_*' er akkumuleret siden budgettets start i året (kun når alle måneder er indlæst). Balanceposter: 'end' er ultimo-saldo, 'change' er månedens bevægelse.\n"
+                  "Opgave:\n"
+                  "1. summary: 2–4 sætninger om måneden: resultat mod budget og det vigtigste, der driver afvigelsen.\n"
+                  "2. focus: 3–7 fokuspunkter, vigtigste først. Kig efter væsentlige afvigelser fra budget, konti uden budget, poster med "
+                  "usædvanligt fortegn eller størrelse, store bevægelser i balancen (debitorer, likviditet, mellemregninger, feriepenge, moms) "
+                  "og om likviditeten passer med prognosen. severity: kritisk (kræver handling nu), vigtig (følg op), info. "
+                  "accounts: de kontonumre punktet handler om.\n"
+                  "3. questions_for_cfo: 2–5 konkrete spørgsmål, CEO'en kan stille CFO'en om det, der undrer.\n"
+                  "Gæt ikke på forklaringer som fakta. Skriv 'kan skyldes' eller stil et spørgsmål, når årsagen ikke fremgår af tallene.")
+        schema = {"type": "object", "additionalProperties": False, "required": ["summary", "focus", "questions_for_cfo"], "properties": {
+            "summary": {"type": "string"},
+            "focus": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+                      "required": ["title", "detail", "severity", "accounts"],
+                      "properties": {"title": {"type": "string"}, "detail": {"type": "string"},
+                                     "severity": {"type": "string", "enum": ["kritisk", "vigtig", "info"]},
+                                     "accounts": {"type": "array", "items": {"type": "integer"}}}}},
+            "questions_for_cfo": {"type": "array", "items": {"type": "string"}}}}
+        return self._claude(system, "Tal (JSON):\n" + json.dumps(payload, ensure_ascii=False, default=_json_default), schema, effort="low", max_tokens=6000)
+
+    def _handle_finance(self, db, method, path, body):
+        import base64
+        parts = path.strip("/").split("/")  # ['api','finance','balances','3','analyze']
+        res = parts[2] if len(parts) > 2 else ""
+        rid = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else None
+        sub = parts[4] if len(parts) > 4 else None
+        if res == "summary" and method == "GET":
+            self._json_response(self._fin_summary(db))
+        elif res == "budget" and method == "GET":
+            r = db.execute("SELECT id, filename, first_month, last_month, uploaded_at, jsonb_object_length(data->'accounts') AS accounts FROM finance_budgets ORDER BY id DESC LIMIT 1").fetchone()
+            self._json_response(dict(r) if r else None)
+        elif res == "budget" and method == "POST":
+            try:
+                parsed = parse_budget_xlsx(base64.b64decode(body.get("data") or ""))
+            except Exception as e:
+                self._error(400, f"Kunne ikke læse budgettet: {e}"); return True
+            r = db.execute("""INSERT INTO finance_budgets (filename, data, first_month, last_month) VALUES (%s,%s,%s,%s)
+                              RETURNING id, filename, first_month, last_month, uploaded_at""",
+                           (body.get("filename"), json.dumps(parsed), parsed["first_month"], parsed["last_month"])).fetchone()
+            db.commit()
+            self._json_response({**dict(r), "accounts": len(parsed["accounts"])}, 201)
+        elif res == "balances" and method == "GET" and rid is None:
+            self._json_response([dict(r) for r in db.execute(
+                """SELECT id, filename, period_start, period_end, uploaded_at, analyzed_at, jsonb_array_length(lines) AS lines
+                   FROM finance_balances ORDER BY period_end DESC, id DESC""").fetchall()])
+        elif res == "balances" and method == "POST" and rid is None:
+            try:
+                parsed = parse_balance(body.get("filename") or "", base64.b64decode(body.get("data") or ""))
+            except Exception as e:
+                self._error(400, f"Kunne ikke læse saldobalancen: {e}"); return True
+            period = parsed["period"]
+            if body.get("month"):
+                y, m = map(int, body["month"].split("-"))
+                nxt = date(y + (m == 12), m % 12 + 1, 1)
+                period = (date(y, m, 1), nxt - timedelta(days=1))
+            if not period:
+                self._error(400, "Vælg hvilken måned saldobalancen dækker"); return True
+            # Samme måned indlæst igen erstatter den gamle
+            db.execute("DELETE FROM finance_balances WHERE period_end = %s", (period[1],))
+            r = db.execute("""INSERT INTO finance_balances (filename, period_start, period_end, lines) VALUES (%s,%s,%s,%s) RETURNING id""",
+                           (body.get("filename"), period[0], period[1], json.dumps(parsed["lines"]))).fetchone()
+            db.commit()
+            self._json_response({"id": r["id"], "period_end": period[1], "lines": len(parsed["lines"])}, 201)
+        elif res == "balances" and rid is not None:
+            bal = db.execute("SELECT * FROM finance_balances WHERE id = %s", (rid,)).fetchone()
+            if not bal:
+                self._error(404, "Saldobalancen findes ikke"); return True
+            bal = dict(bal)
+            if method == "DELETE":
+                db.execute("DELETE FROM finance_balances WHERE id = %s", (rid,)); db.commit(); self._no_content(); return True
+            cmp_ = self._fin_compare(db, bal)
+            if method == "POST" and sub == "analyze":
+                if not os.environ.get("ANTHROPIC_API_KEY"):
+                    self._error(400, "AI er ikke sat op (ANTHROPIC_API_KEY mangler)"); return True
+                try:
+                    data, model = self._fin_analyze(db, bal, cmp_)
+                except Exception as e:
+                    self._error(502, f"AI-analysen fejlede: {e}"); return True
+                db.execute("UPDATE finance_balances SET analysis = %s, analysis_model = %s, analyzed_at = CURRENT_TIMESTAMP WHERE id = %s",
+                           (json.dumps(data), model, rid))
+                db.commit()
+                bal = dict(db.execute("SELECT * FROM finance_balances WHERE id = %s", (rid,)).fetchone())
+            self._json_response({"id": rid, "filename": bal["filename"], "period_start": bal["period_start"], "period_end": bal["period_end"],
+                                 "analysis": bal["analysis"], "analysis_model": bal["analysis_model"], "analyzed_at": bal["analyzed_at"], **cmp_})
+        else:
+            self._error(404, "Endpoint not found")
+        return True
+
     def _set_tender_phase(self, db, tid, phase, who=None, source="manuel", sales_type=None):
         """Skifter fase på et tilbud: gemmer skiftet med dato, holder status i takt og opdaterer kundens fase."""
         t = db.execute("SELECT id, company_id, sales_type, phase FROM tenders WHERE id = %s", (tid,)).fetchone()
@@ -2481,6 +2793,8 @@ class handler(BaseHTTPRequestHandler):
             return self._handle_reports(db, method, path, body, uid)
         if path == "/api/purchasing-groups" or (path.startswith("/api/companies/") and ("/memberships" in path or path.endswith("/group"))):
             return self._handle_groups(db, method, path, body, uid)
+        if path.startswith("/api/finance"):
+            return self._handle_finance(db, method, path, body)
         if not (path.startswith("/api/goals") or path.startswith("/api/meetings") or path.startswith("/api/actions")
                 or path.startswith("/api/milestones") or path.startswith("/api/ceo/") or path.startswith("/api/cron/")):
             return False
@@ -2517,8 +2831,13 @@ class handler(BaseHTTPRequestHandler):
             planned = [dict(r) for r in db.execute("""
                 SELECT id, area, title, meeting_date, status FROM meetings
                 WHERE status != 'done' ORDER BY meeting_date ASC""").fetchall()]
+            # Seneste indrapportering pr. område (ikke øvelser og ikke opfølgninger)
+            reports = {r["area"]: dict(r) for r in db.execute("""
+                SELECT DISTINCT ON (area) id, area, status, created_at, sent_at, submitted_at, reviewed_at FROM report_rounds
+                WHERE NOT practice AND followup_of IS NULL ORDER BY area, created_at DESC""").fetchall()}
             self._json_response({"goals": goals, "open_actions": actions,
-                                 "last_meetings": last_meetings, "planned_meetings": planned})
+                                 "last_meetings": last_meetings, "planned_meetings": planned,
+                                 "reports": reports, "finance": self._fin_summary(db)})
             return True
 
         # ── Goals ──

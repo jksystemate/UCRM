@@ -401,6 +401,104 @@ def parse_dataset(filename, data, anonymize=False):
     return out
 
 
+PBIX_TESTED = {"version": "1.32", "release": "2026.10"}  # den version importen er afprøvet med
+# Kolonner der aldrig importeres: private kontaktoplysninger, interne GUID'er og fritekstnoter på fravær
+_PBIX_DROP_RE = re.compile(r"^(Phone|Mobile|PrivatePhone|Address|ZipCode|City|Email|E-?mail)$|guid", re.I)
+_PBIX_SKIP_TABLE_RE = re.compile(r"^(LocalDateTable_|DateTableTemplate_)")
+
+
+def inspect_pbix(data):
+    """Tjekker at filen er en Power BI-fil med importerede data og læser alle tabeller.
+    Kaster ValueError med en forståelig besked, hvis noget er galt. Rører ikke databasen."""
+    import io, zipfile, tempfile, gzip
+    try:
+        z = zipfile.ZipFile(io.BytesIO(data))
+        names = set(z.namelist())
+    except zipfile.BadZipFile:
+        raise ValueError("Filen er ikke en gyldig Power BI-fil (.pbix). Er den downloadet helt?")
+    if "Version" not in names:
+        raise ValueError("Filen mangler Power BI's versionsoplysning og ligner ikke en .pbix-fil.")
+    if "DataModel" not in names:
+        raise ValueError("Filen indeholder ingen data (rapporten er forbundet live til et datasæt). Download en version med data, eller brug Eksportér data.")
+    version = z.read("Version").decode("utf-16-le", errors="replace").strip("\x00 ")
+    try:
+        release = json.loads(z.read("Metadata").decode("utf-16-le")).get("CreatedFromRelease") if "Metadata" in names else None
+    except Exception:
+        release = None
+    try:
+        major = int(version.split(".")[0])
+    except ValueError:
+        major = None
+    if major != 1:
+        raise ValueError(f"Ukendt Power BI-filversion '{version}'. Importen understøtter version 1.x.")
+    warnings = []
+    if version != PBIX_TESTED["version"] or (release and release != PBIX_TESTED["release"]):
+        warnings.append(f"Filen er lavet med Power BI {version} ({release or 'ukendt udgave'}), importen er afprøvet med {PBIX_TESTED['version']} ({PBIX_TESTED['release']}). Tjek at tabeller og rækketal ser rigtige ud.")
+    with tempfile.NamedTemporaryFile(suffix=".pbix") as tf:
+        tf.write(data); tf.flush()
+        try:
+            from pbixray import PBIXRay
+            m = PBIXRay(tf.name)
+        except Exception as e:
+            raise ValueError(f"Datamodellen i filen kunne ikke læses ({type(e).__name__}). Filformatet er måske nyere end importen kender.")
+        refreshed = None
+        try:
+            pt = m.tmschema_partitions
+            pt = pt[~pt["TableName"].astype(str).str.match(_PBIX_SKIP_TABLE_RE)]
+            mx = pt["RefreshedTime"].dropna().max()
+            refreshed = None if mx is None or str(mx) in ("NaT", "nan") else mx.to_pydatetime()
+        except Exception:
+            pass
+        tables, data_to = [], None
+        for name in m.tables:
+            if _PBIX_SKIP_TABLE_RE.match(str(name)):
+                continue
+            df, err = None, None
+            # numpy kan give en falsk FloatingPointError, når et gammelt overløbsflag hænger ved; et nyt forsøg læser korrekt
+            for _ in range(4):
+                try:
+                    df = m.get_table(name); break
+                except FloatingPointError as e:
+                    err = e
+                except Exception as e:
+                    err = e; break
+            if df is None:
+                warnings.append(f"Tabellen {name} kunne ikke læses ({type(err).__name__}) og er sprunget over.")
+                continue
+            dropped = [c for c in df.columns if _PBIX_DROP_RE.search(str(c))]
+            if "timeoff" in str(name).lower().replace(" ", "") and "Note" in df.columns:
+                dropped.append("Note")
+            df = df.drop(columns=dropped)
+            if df.empty or not len(df.columns):
+                continue
+            # Seneste dato i data (fremtidige datoer som forfald tæller ikke)
+            for c in df.columns:
+                if str(df[c].dtype).startswith("datetime64") and c.lower() in ("date", "dato"):
+                    mx = df[c].max()
+                    if str(mx) != "NaT" and (data_to is None or mx.date() > data_to) and mx.date() <= date.today():
+                        data_to = mx.date()
+            csv_text = df.to_csv(index=False, date_format="%Y-%m-%d")
+            tables.append({"name": str(name), "columns": [str(c) for c in df.columns], "row_count": int(len(df)),
+                           "dropped": dropped, "csv_gz": gzip.compress(csv_text.encode())})
+        if not tables:
+            raise ValueError("Fandt ingen tabeller med data i filen.")
+        measures = []
+        try:
+            for _, r in m.dax_measures.iterrows():
+                measures.append({"table": r["TableName"], "name": r["Name"], "expression": str(r["Expression"] or "").strip()})
+        except Exception:
+            pass
+        relationships = []
+        try:
+            for _, r in m.relationships.iterrows():
+                if not _PBIX_SKIP_TABLE_RE.match(str(r["ToTableName"])):
+                    relationships.append(f"{r['FromTableName']}[{r['FromColumnName']}] -> {r['ToTableName']}[{r['ToColumnName']}]")
+        except Exception:
+            pass
+    return {"version": version, "release": release, "refreshed_at": refreshed, "data_to": data_to,
+            "tables": tables, "measures": measures, "relationships": relationships, "warnings": warnings}
+
+
 def _dataset_csv(columns, rows):
     import io, csv
     buf = io.StringIO()
@@ -921,6 +1019,30 @@ def init_db():
                 anonymized JSONB DEFAULT '[]',
                 csv_gz BYTEA NOT NULL,
                 uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS finance_imports (
+                id SERIAL PRIMARY KEY,
+                filename TEXT,
+                status TEXT NOT NULL DEFAULT 'staged',
+                file_version TEXT,
+                release TEXT,
+                refreshed_at TIMESTAMP,
+                data_to DATE,
+                measures JSONB DEFAULT '[]',
+                relationships JSONB DEFAULT '[]',
+                warnings JSONB DEFAULT '[]',
+                uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                activated_at TIMESTAMP
+            )""",
+            "ALTER TABLE finance_datasets ADD COLUMN IF NOT EXISTS import_id INTEGER REFERENCES finance_imports(id) ON DELETE CASCADE",
+            "ALTER TABLE finance_datasets ADD COLUMN IF NOT EXISTS dropped JSONB DEFAULT '[]'",
+            "ALTER TABLE finance_datasets ADD COLUMN IF NOT EXISTS file_id TEXT",
+            """CREATE TABLE IF NOT EXISTS finance_upload_chunks (
+                upload_id TEXT NOT NULL,
+                idx INTEGER NOT NULL,
+                data BYTEA NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (upload_id, idx)
             )""",
             "ALTER TABLE tenders ADD COLUMN IF NOT EXISTS phase TEXT",
             "ALTER TABLE tenders ADD COLUMN IF NOT EXISTS phase_changed_at TIMESTAMP",
@@ -2862,7 +2984,8 @@ class handler(BaseHTTPRequestHandler):
         import anthropic
         import gzip
         b = db.execute("SELECT filename, data FROM finance_budgets ORDER BY id DESC LIMIT 1").fetchone()
-        datasets = [dict(r) for r in db.execute("SELECT * FROM finance_datasets ORDER BY id").fetchall()]
+        datasets = self._fin_active_datasets(db)
+        pbix = db.execute("SELECT * FROM finance_imports WHERE status = 'active' ORDER BY id DESC LIMIT 1").fetchone()
         digest = ((b["data"] or {}).get("digest") if b else None)
         if not digest and not datasets:
             raise ValueError("Indlæs budgetfilen (igen) eller et dataudtræk først, så AI har noget at regne på")
@@ -2898,36 +3021,74 @@ class handler(BaseHTTPRequestHandler):
             "2. ## Sådan er det regnet: trin med tal, gerne en lille tabel (| kolonne | kolonne |).\n"
             "3. ## Forudsætninger og forbehold: punktliste.\n"
             "4. Evt. ## Det bør du overveje: 1–3 konsekvenser eller alternativer.\n\n"
-            "## Budgetfilen\n" + (digest or "(ingen budgetfil indlæst)") + actual + self._fin_dataset_overview(datasets))}]
+            "## Budgetfilen\n" + (digest or "(ingen budgetfil indlæst)") + actual + self._fin_dataset_overview(datasets, pbix))}]
         msgs = [m for m in (history or []) if m.get("role") in ("user", "assistant") and m.get("content")][-6:]
         client = anthropic.Anthropic(timeout=270, max_retries=1)
-        # Dataudtræk lægges i kodeværktøjets container som CSV-filer. De slettes igen efter svaret.
-        file_ids = []
-        try:
-            for d in datasets:
-                fname = re.sub(r"[^A-Za-z0-9.-]+", "_", f"{d['id']}_{d['name']}")[:80] + ".csv"
-                f = client.files.upload(file=(fname, gzip.decompress(bytes(d["csv_gz"])), "text/csv"))
-                file_ids.append(f.id)
-            content = [{"type": "text", "text": question}] + [{"type": "container_upload", "file_id": fid} for fid in file_ids]
-            return self._fin_ask_run(client, system, msgs + [{"role": "user", "content": content if file_ids else question}])
-        finally:
-            for fid in file_ids:
-                try:
-                    client.files.delete(fid)
-                except Exception:
-                    pass
+        # Dataudtræk ligger som komprimerede CSV-filer hos Anthropic (uploades første gang, de bruges) og lægges i kodeværktøjets container
+        for attempt in range(2):
+            content = [{"type": "text", "text": question}] + [
+                {"type": "container_upload", "file_id": self._fin_file_id(db, client, d)} for d in datasets]
+            try:
+                return self._fin_ask_run(client, system, msgs + [{"role": "user", "content": content if datasets else question}])
+            except anthropic.APIStatusError as e:
+                # En fil kan være slettet hos Anthropic: upload forfra én gang
+                if attempt or not datasets or "file" not in str(e).lower():
+                    raise
+                db.execute("UPDATE finance_datasets SET file_id = NULL WHERE id = ANY(%s)", ([d["id"] for d in datasets],)); db.commit()
+                for d in datasets:
+                    d["file_id"] = None
 
-    def _fin_dataset_overview(self, datasets):
+    @staticmethod
+    def _fin_file_name(d):
+        return re.sub(r"[^A-Za-z0-9.-]+", "_", f"{d['id']}_{d['name']}")[:80] + ".csv.gz"
+
+    def _fin_file_id(self, db, client, d):
+        if not d.get("file_id"):
+            f = client.files.upload(file=(self._fin_file_name(d), bytes(d["csv_gz"]), "application/gzip"))
+            d["file_id"] = f.id
+            db.execute("UPDATE finance_datasets SET file_id = %s WHERE id = %s", (f.id, d["id"])); db.commit()
+        return d["file_id"]
+
+    @staticmethod
+    def _fin_active_datasets(db):
+        return [dict(r) for r in db.execute("""SELECT d.* FROM finance_datasets d LEFT JOIN finance_imports i ON i.id = d.import_id
+                                                WHERE d.import_id IS NULL OR i.status = 'active' ORDER BY d.id""").fetchall()]
+
+    @staticmethod
+    def _fin_delete_files(file_ids):
+        """Sletter uploadede filer hos Anthropic (bedste forsøg)."""
+        file_ids = [f for f in file_ids if f]
+        if not file_ids or not os.environ.get("ANTHROPIC_API_KEY"):
+            return
+        import anthropic
+        client = anthropic.Anthropic(timeout=30, max_retries=0)
+        for fid in file_ids:
+            try:
+                client.files.delete(fid)
+            except Exception:
+                pass
+
+    def _fin_dataset_overview(self, datasets, pbix=None):
         """Kort beskrivelse af hvert dataudtræk (kolonner, antal rækker, eksempelrækker) til systemprompten."""
         import gzip
         if not datasets:
             return ""
-        parts = ["\n\n## Dataudtræk (CSV-filer i arbejdsmappen)"]
+        parts = ["\n\n## Dataudtræk (komprimerede CSV-filer, .csv.gz, i arbejdsmappen; læs med pandas.read_csv)"]
+        if pbix:
+            parts.append(f"Tabeller markeret 'Power BI' kommer fra {pbix['filename']}, data opdateret {pbix['refreshed_at']}. "
+                         "Prefikset i tabelnavnet viser kilden: 'TL:' = TimeLog (tidsregistrering, fravær, normtid, medarbejdere), "
+                         "'E:' = e-conomic (bogføring, fakturaer, kunder), 'Nordea:' = bank, 'Opmapning:' = kontogrupper.")
         for d in datasets:
-            lines = gzip.decompress(bytes(d["csv_gz"])).decode().splitlines()
-            fname = re.sub(r"[^A-Za-z0-9.-]+", "_", f"{d['id']}_{d['name']}")[:80] + ".csv"
+            raw = gzip.decompress(bytes(d["csv_gz"]))
+            head = raw[:20000].decode(errors="replace").splitlines()[:4]
+            src = "Power BI" if d.get("import_id") else f"fra {d['filename']}, fane {d['name']}"
             anon = f" Pseudonymiserede kolonner: {', '.join(d['anonymized'])}." if d.get("anonymized") else ""
-            parts.append(f"### {fname} (fra {d['filename']}, fane {d['name']}): {d['row_count']} rækker.{anon}\n" + "\n".join(lines[:4]))
+            parts.append(f"### {self._fin_file_name(d)} ({src}: {d['name']}): {d['row_count']} rækker.{anon}\n" + "\n".join(h[:1500] for h in head))
+        if pbix and pbix.get("relationships"):
+            parts.append("### Relationer mellem tabellerne (Power BI-modellen)\n" + "\n".join(pbix["relationships"]))
+        if pbix and pbix.get("measures"):
+            parts.append("### Beregninger i Power BI-rapporten (DAX), brug dem som definitioner\n" + "\n".join(
+                f"- {x['table']} › {x['name']} = {' '.join(x['expression'].split())[:400]}" for x in pbix["measures"]))
         return "\n\n".join(parts)
 
     def _fin_ask_run(self, client, system, msgs):
@@ -2948,6 +3109,104 @@ class handler(BaseHTTPRequestHandler):
         if not text:
             raise RuntimeError("AI gav ikke noget svar. Prøv at stille spørgsmålet mere konkret.")
         return text, resp.model
+
+    def _pbix_summary(self, db, imp):
+        if not imp:
+            return None
+        imp = dict(imp)
+        imp["tables"] = [dict(r) for r in db.execute(
+            "SELECT id, name, columns, row_count, dropped FROM finance_datasets WHERE import_id = %s ORDER BY name", (imp["id"],)).fetchall()]
+        imp["measures"] = len(imp.get("measures") or [])
+        imp["relationships"] = len(imp.get("relationships") or [])
+        return imp
+
+    def _handle_pbix(self, db, method, parts, body):
+        """Import af Power BI-fil i trin: upload i bidder › kontrol og forhåndsvisning (kladde) › aktivér.
+        Den aktive import røres først, når CEO'en aktiverer en kontrolleret kladde."""
+        import base64, gzip
+        step = parts[3] if len(parts) > 3 else ""
+        iid = int(step) if step.isdigit() else None
+        action = parts[4] if len(parts) > 4 else None
+        if method == "GET" and not step:
+            active = db.execute("SELECT * FROM finance_imports WHERE status = 'active' ORDER BY id DESC LIMIT 1").fetchone()
+            self._json_response({"active": self._pbix_summary(db, active)})
+        elif method == "POST" and step == "chunk":
+            uid = str(body.get("upload_id") or "")
+            if not re.fullmatch(r"[a-z0-9-]{8,64}", uid):
+                self._error(400, "Ugyldigt upload-id"); return True
+            db.execute("DELETE FROM finance_upload_chunks WHERE created_at < NOW() - INTERVAL '1 day'")
+            db.execute("""INSERT INTO finance_upload_chunks (upload_id, idx, data) VALUES (%s,%s,%s)
+                          ON CONFLICT (upload_id, idx) DO UPDATE SET data = EXCLUDED.data""",
+                       (uid, int(body.get("index", 0)), psycopg2.Binary(base64.b64decode(body.get("data") or ""))))
+            db.commit()
+            self._json_response({"ok": True})
+        elif method == "POST" and step == "inspect":
+            uid = str(body.get("upload_id") or "")
+            chunks = db.execute("SELECT idx, data FROM finance_upload_chunks WHERE upload_id = %s ORDER BY idx", (uid,)).fetchall()
+            db.execute("DELETE FROM finance_upload_chunks WHERE upload_id = %s", (uid,)); db.commit()
+            if len(chunks) != int(body.get("total") or -1) or [c["idx"] for c in chunks] != list(range(len(chunks))):
+                self._error(400, "Filen blev ikke uploadet helt. Prøv igen."); return True
+            try:
+                parsed = inspect_pbix(b"".join(bytes(c["data"]) for c in chunks))
+            except ValueError as e:
+                self._error(400, str(e)); return True
+            except Exception as e:
+                self._error(400, f"Filen kunne ikke læses: {type(e).__name__}: {e}"); return True
+            active = db.execute("SELECT * FROM finance_imports WHERE status = 'active' ORDER BY id DESC LIMIT 1").fetchone()
+            warnings, older = list(parsed["warnings"]), False
+            if active:
+                if active["refreshed_at"] and parsed["refreshed_at"] and parsed["refreshed_at"] < active["refreshed_at"]:
+                    older = True
+                    warnings.insert(0, f"Data i denne fil er opdateret {parsed['refreshed_at']:%d.%m.%Y %H:%M}, men de aktive data er nyere ({active['refreshed_at']:%d.%m.%Y %H:%M}). Hvis du fortsætter, erstattes nyere data med ældre.")
+                prev = {r["name"]: r for r in db.execute("SELECT name, columns, row_count FROM finance_datasets WHERE import_id = %s", (active["id"],)).fetchall()}
+                new_t = {t["name"]: t for t in parsed["tables"]}
+                missing = [n for n in prev if n not in new_t]
+                if missing:
+                    warnings.append("Disse tabeller fandtes i de aktive data, men mangler i den nye fil: " + ", ".join(missing))
+                for n, t in new_t.items():
+                    if n in prev:
+                        lost_cols = [c for c in prev[n]["columns"] if c not in t["columns"]]
+                        if lost_cols:
+                            warnings.append(f"{n}: kolonnerne {', '.join(lost_cols)} er forsvundet.")
+                        if prev[n]["row_count"] > 100 and t["row_count"] < prev[n]["row_count"] * 0.8:
+                            warnings.append(f"{n}: {t['row_count']:,} rækker mod {prev[n]['row_count']:,} i de aktive data.".replace(",", "."))
+            # Gamle kladder ryddes; den aktive import røres ikke
+            db.execute("DELETE FROM finance_imports WHERE status = 'staged'")
+            imp = db.execute("""INSERT INTO finance_imports (filename, file_version, release, refreshed_at, data_to, measures, relationships, warnings)
+                                VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *""",
+                             (body.get("filename"), parsed["version"], parsed["release"], parsed["refreshed_at"], parsed["data_to"],
+                              json.dumps(parsed["measures"]), json.dumps(parsed["relationships"]), json.dumps(warnings))).fetchone()
+            for t in parsed["tables"]:
+                db.execute("""INSERT INTO finance_datasets (filename, name, columns, row_count, anonymized, dropped, csv_gz, import_id)
+                              VALUES (%s,%s,%s,%s,'[]',%s,%s,%s)""",
+                           (body.get("filename"), t["name"], json.dumps(t["columns"]), t["row_count"], json.dumps(t["dropped"]),
+                            psycopg2.Binary(t["csv_gz"]), imp["id"]))
+            db.commit()
+            self._json_response({**self._pbix_summary(db, imp), "older": older,
+                                 "active": self._pbix_summary(db, active)}, 201)
+        elif method == "POST" and iid and action == "activate":
+            imp = db.execute("SELECT * FROM finance_imports WHERE id = %s AND status = 'staged'", (iid,)).fetchone()
+            if not imp:
+                self._error(404, "Kladden findes ikke længere. Indlæs filen igen."); return True
+            active = db.execute("SELECT * FROM finance_imports WHERE status = 'active' ORDER BY id DESC LIMIT 1").fetchone()
+            if active and active["refreshed_at"] and imp["refreshed_at"] and imp["refreshed_at"] < active["refreshed_at"] and not body.get("confirm_older"):
+                self._error(409, "Filen er ældre end de aktive data. Bekræft, at du vil erstatte dem."); return True
+            # Skiftet sker i én transaktion: enten er den nye import aktiv, eller den gamle er uændret
+            old_files = [r["file_id"] for r in db.execute(
+                "SELECT d.file_id FROM finance_datasets d JOIN finance_imports i ON i.id = d.import_id WHERE i.status = 'active'").fetchall()]
+            db.execute("DELETE FROM finance_imports WHERE status = 'active'")
+            db.execute("UPDATE finance_imports SET status = 'active', activated_at = CURRENT_TIMESTAMP WHERE id = %s", (iid,))
+            db.commit()
+            self._fin_delete_files(old_files)
+            self._json_response(self._pbix_summary(db, db.execute("SELECT * FROM finance_imports WHERE id = %s", (iid,)).fetchone()))
+        elif method == "DELETE" and iid:
+            old_files = [r["file_id"] for r in db.execute("SELECT file_id FROM finance_datasets WHERE import_id = %s", (iid,)).fetchall()]
+            db.execute("DELETE FROM finance_imports WHERE id = %s", (iid,)); db.commit()
+            self._fin_delete_files(old_files)
+            self._no_content()
+        else:
+            self._error(404, "Endpoint not found")
+        return True
 
     def _handle_finance(self, db, method, path, body):
         import base64
@@ -2970,9 +3229,11 @@ class handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._error(502, f"AI kunne ikke svare: {e}"); return True
             self._json_response({"answer": text, "model": model})
+        elif res == "pbix":
+            return self._handle_pbix(db, method, parts, body)
         elif res == "datasets" and method == "GET":
             self._json_response([dict(r) for r in db.execute(
-                "SELECT id, filename, name, columns, row_count, anonymized, uploaded_at FROM finance_datasets ORDER BY id").fetchall()])
+                "SELECT id, filename, name, columns, row_count, anonymized, uploaded_at FROM finance_datasets WHERE import_id IS NULL ORDER BY id").fetchall()])
         elif res == "datasets" and method == "POST":
             import gzip
             try:
@@ -2982,7 +3243,9 @@ class handler(BaseHTTPRequestHandler):
             out = []
             for t in tables:
                 # Samme fil og fane indlæst igen erstatter den gamle version
-                db.execute("DELETE FROM finance_datasets WHERE filename = %s AND name = %s", (body.get("filename"), t["name"]))
+                old_files = [r["file_id"] for r in db.execute("DELETE FROM finance_datasets WHERE import_id IS NULL AND filename = %s AND name = %s RETURNING file_id",
+                                                             (body.get("filename"), t["name"])).fetchall()]
+                self._fin_delete_files(old_files)
                 r = db.execute("""INSERT INTO finance_datasets (filename, name, columns, row_count, anonymized, csv_gz)
                                   VALUES (%s,%s,%s,%s,%s,%s) RETURNING id, filename, name, columns, row_count, anonymized, uploaded_at""",
                                (body.get("filename"), t["name"], json.dumps(t["columns"]), len(t["rows"]), json.dumps(t["anonymized"]),
@@ -2991,7 +3254,8 @@ class handler(BaseHTTPRequestHandler):
             db.commit()
             self._json_response(out, 201)
         elif res == "datasets" and method == "DELETE" and rid is not None:
-            db.execute("DELETE FROM finance_datasets WHERE id = %s", (rid,)); db.commit(); self._no_content()
+            old_files = [r["file_id"] for r in db.execute("DELETE FROM finance_datasets WHERE id = %s AND import_id IS NULL RETURNING file_id", (rid,)).fetchall()]
+            db.commit(); self._fin_delete_files(old_files); self._no_content()
         elif res == "budget" and method == "GET":
             r = db.execute("""SELECT id, filename, first_month, last_month, uploaded_at, (SELECT COUNT(*) FROM jsonb_object_keys(data->'accounts')) AS accounts,
                               (data ? 'digest') AS has_digest FROM finance_budgets ORDER BY id DESC LIMIT 1""").fetchone()

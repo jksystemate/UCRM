@@ -177,6 +177,11 @@ export const api = {
     getFinanceDatasets: () => request('/finance/datasets'),
     uploadFinanceDataset: (data) => request('/finance/datasets', { method: 'POST', body: JSON.stringify(data) }),
     deleteFinanceDataset: (id) => request(`/finance/datasets/${id}`, { method: 'DELETE' }),
+    getPbix: () => request('/finance/pbix'),
+    uploadPbixChunk: (data) => request('/finance/pbix/chunk', { method: 'POST', body: JSON.stringify(data) }),
+    inspectPbix: (data) => request('/finance/pbix/inspect', { method: 'POST', body: JSON.stringify(data) }),
+    activatePbix: (id, confirmOlder = false) => request(`/finance/pbix/${id}/activate`, { method: 'POST', body: JSON.stringify({ confirm_older: confirmOlder }) }),
+    deletePbix: (id) => request(`/finance/pbix/${id}`, { method: 'DELETE' }),
     askFinance: (question, history = []) => request('/finance/ask', { method: 'POST', body: JSON.stringify({ question, history }) }),
     getGoals: (params = {}) => {
         const qs = new URLSearchParams(params).toString();

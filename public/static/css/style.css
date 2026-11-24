@@ -845,3 +845,11 @@ th.cursor-pointer:hover { color: #374151; }
 .md table.md-table { border-collapse: collapse; margin: 8px 0; font-size: 13px; }
 .md table.md-table th, .md table.md-table td { border: 1px solid #e5e7eb; padding: 4px 8px; text-align: left; }
 .md table.md-table th { background: #f9fafb; font-weight: 600; }
+
+/* Power BI-import */
+.pbix-tables { display: grid; grid-template-columns: 1fr auto; gap: 2px 16px; font-size: 13px; max-height: 280px; overflow-y: auto; padding: 8px 0; }
+.pbix-row { display: contents; }
+.pbix-preview { border: 1px solid #fcd34d; background: #fffbeb; border-radius: 10px; padding: 14px 16px; margin-bottom: 12px; }
+.pbix-warn { list-style: disc; padding-left: 20px; font-size: 13px; color: #92400e; margin: 6px 0 4px; }
+.pbix-warn li { margin-bottom: 3px; }
+.pbix-row > span:nth-child(2) { white-space: nowrap; }

@@ -1,4 +1,4 @@
-import { api } from './api.js?v=59';
+import { api } from './api.js?v=60';
 
 // ─── Constants ───
 const CATEGORY_LABELS = { opkald:'Opkald', tilbud:'Tilbud', moede:'Møde', opfølgning:'Opfølgning', demo:'Demo', kontrakt:'Kontrakt', implementering:'Implementering', support:'Support', faktura:'Fakturering', budget:'Budget', generelt:'Generelt' };
@@ -916,7 +916,7 @@ const fileToBase64 = file => new Promise((res, rej) => {
 
 async function renderFinance(container) {
     container.innerHTML = '<div class="text-gray-400">Indlæser...</div>';
-    const [budget, balances, datasets] = await Promise.all([api.getFinanceBudget(), api.getFinanceBalances(), api.getFinanceDatasets()]);
+    const [budget, balances, datasets, pbix] = await Promise.all([api.getFinanceBudget(), api.getFinanceBalances(), api.getFinanceDatasets(), api.getPbix()]);
     container.innerHTML = '';
     container.className = 'ml-64 p-8 fade-in';
     container.appendChild(h('div', { className: 'mb-6' },
@@ -957,8 +957,10 @@ async function renderFinance(container) {
                 }),
                 h('label', { className: 'text-xs text-gray-500 flex items-center gap-2' }, 'Måned (valgfri)', monthIn)))));
     container.appendChild(status);
+    container.appendChild(financePbixCard(pbix.active));
     container.appendChild(financeDatasetsCard(datasets, upload, status));
-    if (budget || datasets.length) container.appendChild(financeAskCard(budget, datasets));
+    const allData = [...datasets, ...(pbix.active?.tables || [])];
+    if (budget || allData.length) container.appendChild(financeAskCard(budget, allData));
 
     const list = h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 mt-4' },
         h('div', { className: 'px-5 py-3 border-b border-gray-100 font-semibold text-gray-900' }, 'Indlæste måneder'));
@@ -968,6 +970,78 @@ async function renderFinance(container) {
         h('span', { className: 'text-sm text-gray-500' }, `${b.filename || ''} · ${b.lines} konti`),
         h('span', { className: `ml-auto text-xs font-semibold ${b.analyzed_at ? 'text-green-700' : 'text-gray-400'}` }, b.analyzed_at ? 'Analyseret' : 'Ikke analyseret'), h('span', { className: 'text-gray-300' }, '→')));
     container.appendChild(list);
+}
+
+// Power BI-fil (.pbix): uploades i bidder, kontrolleres og vises som kladde, før den erstatter de aktive data
+const fmtDT = d => d ? new Date(d).toLocaleString('da-DK', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '–';
+const nf = n => Number(n || 0).toLocaleString('da-DK');
+function pbixTables(tables) {
+    return h('div', { className: 'pbix-tables' }, ...tables.map(t => h('div', { className: 'pbix-row', title: t.columns.join(', ') },
+        h('span', { className: 'text-gray-800' }, t.name), h('span', { className: 'text-gray-500 text-right' }, `${nf(t.row_count)} rækker`),
+        t.dropped?.length ? h('span', { className: 'text-xs text-gray-400 col-span-2' }, `Ikke importeret: ${t.dropped.join(', ')}`) : null)));
+}
+function financePbixCard(active) {
+    const card = h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-5 mt-4' });
+    const body = h('div');
+    const msg = h('div', { className: 'text-sm mt-2' });
+    const inp = h('input', { type: 'file', accept: '.pbix', style: 'display:none' });
+    const pick = h('label', { className: 'act-btn primary cursor-pointer' }, active ? 'Indlæs nyere Power BI-fil' : 'Indlæs Power BI-fil (.pbix)', inp);
+    const showActive = () => {
+        body.innerHTML = '';
+        if (!active) { body.appendChild(h('div', { className: 'text-sm text-gray-400 mb-3' }, 'Ingen Power BI-data indlæst endnu.')); return; }
+        const rows = active.tables.reduce((a, t) => a + t.row_count, 0);
+        body.append(
+            h('div', { className: 'text-sm text-gray-700 mb-1' }, h('b', {}, active.filename || 'Power BI'), ` · data opdateret ${fmtDT(active.refreshed_at)} · ${active.tables.length} tabeller · ${nf(rows)} rækker`),
+            h('div', { className: 'text-xs text-gray-400 mb-3' }, `Power BI-version ${active.file_version}${active.release ? ` (${active.release})` : ''} · aktiveret ${fmtDT(active.activated_at)} · ${active.measures} beregninger fra rapporten`),
+            h('details', { className: 'mb-3' }, h('summary', { className: 'text-sm text-gray-600 cursor-pointer' }, 'Vis tabeller'), pbixTables(active.tables)));
+    };
+    const showPreview = (st) => {
+        body.innerHTML = '';
+        const rows = st.tables.reduce((a, t) => a + t.row_count, 0);
+        const confirmOlder = h('input', { type: 'checkbox' });
+        const activate = h('button', { className: 'act-btn primary' }, 'Aktivér data');
+        const cancel = h('button', { className: 'act-btn' }, 'Annullér');
+        activate.addEventListener('click', async () => {
+            if (st.older && !confirmOlder.checked) { msg.className = 'text-sm mt-2 text-red-600'; msg.textContent = 'Sæt flueben, hvis du vil erstatte nyere data med ældre.'; return; }
+            activate.disabled = cancel.disabled = true;
+            try { await api.activatePbix(st.id, confirmOlder.checked); router(); }
+            catch (e) { msg.className = 'text-sm mt-2 text-red-600'; msg.textContent = e.message; activate.disabled = cancel.disabled = false; }
+        });
+        cancel.addEventListener('click', async () => { await api.deletePbix(st.id); msg.textContent = ''; showActive(); pick.style.display = ''; });
+        body.append(h('div', { className: 'pbix-preview' },
+            h('div', { className: 'font-semibold text-gray-900 mb-1' }, 'Kontrolleret, ikke aktiveret endnu'),
+            h('div', { className: 'text-sm text-gray-700' }, `${st.filename} · data opdateret ${fmtDT(st.refreshed_at)} · ${st.tables.length} tabeller · ${nf(rows)} rækker`),
+            h('div', { className: 'text-xs text-gray-500 mb-2' }, `Power BI-version ${st.file_version}${st.release ? ` (${st.release})` : ''} · ${st.measures} beregninger og ${st.relationships} relationer fra rapporten`
+                + (st.active ? ` · erstatter data opdateret ${fmtDT(st.active.refreshed_at)}` : '')),
+            st.warnings?.length ? h('ul', { className: 'pbix-warn' }, ...st.warnings.map(w => h('li', {}, w))) : h('div', { className: 'text-sm text-green-700 mb-2' }, '✓ Format og version er i orden, og intet mangler i forhold til de aktive data.'),
+            pbixTables(st.tables),
+            st.older ? h('label', { className: 'text-sm text-red-700 flex items-center gap-2 mt-3' }, confirmOlder, 'Ja, erstat de nyere data med denne ældre fil') : null,
+            h('div', { className: 'flex gap-2 mt-3' }, activate, cancel),
+            h('div', { className: 'text-xs text-gray-400 mt-2' }, st.active ? 'De aktive data bruges, indtil du klikker Aktivér. Så skiftes alt på én gang.' : 'Data bruges først, når du klikker Aktivér.')));
+        pick.style.display = 'none';
+    };
+    inp.addEventListener('change', async () => {
+        const f = inp.files[0]; inp.value = ''; if (!f) return;
+        if (!f.name.toLowerCase().endsWith('.pbix')) { msg.className = 'text-sm mt-2 text-red-600'; msg.textContent = 'Vælg en .pbix-fil.'; return; }
+        pick.style.display = 'none';
+        const CH = 2.5 * 1024 * 1024, total = Math.ceil(f.size / CH);
+        const uid = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2)).toLowerCase();
+        try {
+            for (let i = 0; i < total; i++) {
+                msg.className = 'text-sm mt-2 text-gray-600'; msg.textContent = `Uploader ${f.name}: ${Math.round(i / total * 100)} %`;
+                await api.uploadPbixChunk({ upload_id: uid, index: i, data: await fileToBase64(f.slice(i * CH, (i + 1) * CH)) });
+            }
+            msg.textContent = 'Kontrollerer format og version og læser tabellerne… (op til et minut)';
+            const st = await api.inspectPbix({ upload_id: uid, total, filename: f.name });
+            msg.textContent = '';
+            showPreview(st);
+        } catch (e) { msg.className = 'text-sm mt-2 text-red-600'; msg.textContent = e.message; pick.style.display = ''; }
+    });
+    card.append(h('div', { className: 'font-semibold text-gray-900 mb-1' }, 'Power BI-data'),
+        h('p', { className: 'text-sm text-gray-500 mb-3' }, 'Hent filen i Power BI (Filer › Download denne fil) og indlæs den her. Filen kontrolleres først, og du ser tabeller og advarsler, før den erstatter de aktive data. Private kontaktoplysninger (adresse, telefon, e-mail) og noter på fravær importeres ikke.'),
+        body, pick, msg);
+    showActive();
+    return card;
 }
 
 // Dataudtræk (Power BI, TimeLog, bank …) som AI kan regne på, fx timer, fakturerbarhed og fravær pr. medarbejder
@@ -1032,7 +1106,7 @@ function financeAskCard(budget, datasets = []) {
             h('div', { className: 'font-semibold text-gray-900' }, '✦ Spørg om budget og data'),
             _financeChat.length ? h('button', { className: 'text-xs text-gray-500 hover:underline', onClick: () => { _financeChat = []; draw(); } }, 'Ny samtale') : null),
         h('p', { className: 'text-sm text-gray-500 mb-3' }, ready
-            ? `AI kender ${[budget?.has_digest ? 'hele budgetfilen og den seneste saldobalance' : null, datasets.length ? `${datasets.length} dataudtræk` : null].filter(Boolean).join(' og ')} og regner med kode. Svarene viser beregning og forudsætninger, så du kan tjekke dem.`
+            ? `AI kender ${[budget?.has_digest ? 'hele budgetfilen og den seneste saldobalance' : null, datasets.length ? `${datasets.length} datatabeller` : null].filter(Boolean).join(' og ')} og regner med kode. Svarene viser beregning og forudsætninger, så du kan tjekke dem.`
             : 'Indlæs budgetfilen igen (knappen ovenfor), så AI kan læse alle fanerne. Den nuværende blev indlæst, før denne funktion fandtes.'),
         chat,
         h('div', { className: 'flex flex-wrap gap-2 mb-2' }, ...examples.map(x => h('button', { className: 'fin-chip', ...(ready ? {} : { disabled: '' }), onClick: () => ask(x) }, x))),

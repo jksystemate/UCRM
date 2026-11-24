@@ -174,6 +174,9 @@ export const api = {
     uploadFinanceBalance: (data) => request('/finance/balances', { method: 'POST', body: JSON.stringify(data) }),
     analyzeFinanceBalance: (id) => request(`/finance/balances/${id}/analyze`, { method: 'POST' }),
     deleteFinanceBalance: (id) => request(`/finance/balances/${id}`, { method: 'DELETE' }),
+    getFinanceDatasets: () => request('/finance/datasets'),
+    uploadFinanceDataset: (data) => request('/finance/datasets', { method: 'POST', body: JSON.stringify(data) }),
+    deleteFinanceDataset: (id) => request(`/finance/datasets/${id}`, { method: 'DELETE' }),
     askFinance: (question, history = []) => request('/finance/ask', { method: 'POST', body: JSON.stringify({ question, history }) }),
     getGoals: (params = {}) => {
         const qs = new URLSearchParams(params).toString();

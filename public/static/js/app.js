@@ -1,4 +1,4 @@
-import { api } from './api.js?v=58';
+import { api } from './api.js?v=59';
 
 // ─── Constants ───
 const CATEGORY_LABELS = { opkald:'Opkald', tilbud:'Tilbud', moede:'Møde', opfølgning:'Opfølgning', demo:'Demo', kontrakt:'Kontrakt', implementering:'Implementering', support:'Support', faktura:'Fakturering', budget:'Budget', generelt:'Generelt' };
@@ -916,7 +916,7 @@ const fileToBase64 = file => new Promise((res, rej) => {
 
 async function renderFinance(container) {
     container.innerHTML = '<div class="text-gray-400">Indlæser...</div>';
-    const [budget, balances] = await Promise.all([api.getFinanceBudget(), api.getFinanceBalances()]);
+    const [budget, balances, datasets] = await Promise.all([api.getFinanceBudget(), api.getFinanceBalances(), api.getFinanceDatasets()]);
     container.innerHTML = '';
     container.className = 'ml-64 p-8 fade-in';
     container.appendChild(h('div', { className: 'mb-6' },
@@ -957,7 +957,8 @@ async function renderFinance(container) {
                 }),
                 h('label', { className: 'text-xs text-gray-500 flex items-center gap-2' }, 'Måned (valgfri)', monthIn)))));
     container.appendChild(status);
-    if (budget) container.appendChild(financeAskCard(budget));
+    container.appendChild(financeDatasetsCard(datasets, upload, status));
+    if (budget || datasets.length) container.appendChild(financeAskCard(budget, datasets));
 
     const list = h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 mt-4' },
         h('div', { className: 'px-5 py-3 border-b border-gray-100 font-semibold text-gray-900' }, 'Indlæste måneder'));
@@ -969,9 +970,36 @@ async function renderFinance(container) {
     container.appendChild(list);
 }
 
-// Spørg AI om det aktive budget, fx konsekvensberegninger. Samtalen huskes kun, mens siden er åben.
+// Dataudtræk (Power BI, TimeLog, bank …) som AI kan regne på, fx timer, fakturerbarhed og fravær pr. medarbejder
+function financeDatasetsCard(datasets, upload, status) {
+    const anon = h('input', { type: 'checkbox' });
+    const card = h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-5 mt-4' },
+        h('div', { className: 'font-semibold text-gray-900 mb-1' }, 'Dataudtræk til AI'),
+        h('p', { className: 'text-sm text-gray-500 mb-3' }, 'Excel eller CSV, fx eksporteret fra Power BI (højreklik på en tabel › Eksportér data) eller TimeLog: timer, fakturerbarhed, normtid, fravær, sygdom og bankposteringer. Hver fane bliver en tabel, som AI regner på, når du stiller spørgsmål. Samme fil indlæst igen erstatter den gamle. Maks. ca. 3 MB pr. fil.'),
+        h('div', { className: 'flex items-center gap-4 flex-wrap mb-3' },
+            upload('.xlsx,.xlsm,.csv', 'Indlæs dataudtræk', async f => {
+                if (f.size > 3.2 * 1024 * 1024) throw new Error(`${f.name} er ${(f.size / 1048576).toFixed(1)} MB. Maks. ca. 3 MB: gem som .xlsx, eller del udtrækket op (fx pr. halvår).`);
+                const r = await api.uploadFinanceDataset({ filename: f.name, data: await fileToBase64(f), anonymize: anon.checked });
+                status.className = 'text-sm mt-2 text-green-700';
+                status.textContent = `Indlæst: ${r.map(t => `${t.name} (${t.row_count.toLocaleString('da-DK')} rækker)`).join(', ')}.`;
+                setTimeout(router, 1200);
+            }),
+            h('label', { className: 'text-xs text-gray-500 flex items-center gap-2' }, anon, 'Skjul navne i fravær/sygdom (erstattes af Person 1, 2 …)')));
+    if (!datasets.length) card.appendChild(h('div', { className: 'text-sm text-gray-400' }, 'Ingen dataudtræk endnu.'));
+    for (const d of datasets) card.appendChild(h('div', { className: 'flex items-start gap-3 py-2 border-t border-gray-100 text-sm' },
+        h('div', { className: 'flex-1 min-w-0' },
+            h('div', {}, h('b', { className: 'text-gray-900' }, d.name), h('span', { className: 'text-gray-500' }, ` · ${d.filename || ''} · ${d.row_count.toLocaleString('da-DK')} rækker · indlæst ${formatDate(d.uploaded_at)}`)),
+            h('div', { className: 'text-xs text-gray-400 truncate', title: d.columns.join(', ') }, d.columns.join(', ')),
+            d.anonymized?.length ? h('div', { className: 'text-xs text-amber-700' }, `Navne skjult i: ${d.anonymized.join(', ')}`) : null),
+        h('button', { className: 'text-xs text-red-600 hover:underline', onClick: async () => {
+            if (!confirm(`Slet ${d.name}?`)) return; await api.deleteFinanceDataset(d.id); router(); } }, 'Slet')));
+    return card;
+}
+
+// Spørg AI om budget og dataudtræk, fx konsekvensberegninger. Samtalen huskes kun, mens siden er åben.
 let _financeChat = [];
-function financeAskCard(budget) {
+function financeAskCard(budget, datasets = []) {
+    const ready = !!(budget?.has_digest || datasets.length);
     const card = h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-5 mt-4' });
     const chat = h('div', { className: 'fin-chat' });
     const draw = () => {
@@ -980,7 +1008,7 @@ function financeAskCard(budget) {
             : h('div', { className: 'as-a md', innerHTML: miniMarkdown(m.content) }));
     };
     const input = h('textarea', { rows: '2', className: 'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm',
-        placeholder: 'Fx: Hvor mange skal vi afskedige, for at Settl-investeringen går i nul i 2027?', ...(budget.has_digest ? {} : { disabled: '' }) });
+        placeholder: 'Fx: Hvor mange skal vi afskedige, for at Settl-investeringen går i nul i 2027?', ...(ready ? {} : { disabled: '' }) });
     const btn = h('button', { className: 'act-btn primary' }, 'Spørg');
     const ask = async (q) => {
         q = (q || '').trim(); if (!q) return;
@@ -993,19 +1021,21 @@ function financeAskCard(budget) {
     };
     btn.addEventListener('click', () => { const q = input.value; input.value = ''; ask(q); });
     input.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); btn.click(); } });
-    const examples = ['Hvor mange skal vi afskedige, for at Settl-investeringen går i nul i 2027?',
+    const examples = [...(budget?.has_digest ? ['Hvor mange skal vi afskedige, for at Settl-investeringen går i nul i 2027?',
         'Hvad sker der med likviditeten, hvis Settl-omsætningen bliver 20 % lavere i 2027?',
-        'Hvornår tjener Settl sig hjem, og hvad er break-even i antal kunder?',
-        'Hvad koster det årligt at ansætte to udviklere mere?'];
+        'Hvad koster det årligt at ansætte to udviklere mere?'] : []),
+        ...(datasets.length ? ['Hvad er faktureringsgraden pr. medarbejder de seneste 3 måneder?',
+        'Hvem har mest sygefravær i år, og hvordan udvikler det sig pr. måned?',
+        'Hvilke kunder og projekter bruger flest ikke-fakturerbare timer?'] : [])];
     card.append(
         h('div', { className: 'flex items-center justify-between gap-3 mb-1' },
-            h('div', { className: 'font-semibold text-gray-900' }, '✦ Spørg om budgettet'),
+            h('div', { className: 'font-semibold text-gray-900' }, '✦ Spørg om budget og data'),
             _financeChat.length ? h('button', { className: 'text-xs text-gray-500 hover:underline', onClick: () => { _financeChat = []; draw(); } }, 'Ny samtale') : null),
-        h('p', { className: 'text-sm text-gray-500 mb-3' }, budget.has_digest
-            ? 'AI kender hele budgetfilen og den seneste saldobalance og regner konsekvenser med kode. Svarene viser beregning og forudsætninger, så du kan tjekke dem.'
+        h('p', { className: 'text-sm text-gray-500 mb-3' }, ready
+            ? `AI kender ${[budget?.has_digest ? 'hele budgetfilen og den seneste saldobalance' : null, datasets.length ? `${datasets.length} dataudtræk` : null].filter(Boolean).join(' og ')} og regner med kode. Svarene viser beregning og forudsætninger, så du kan tjekke dem.`
             : 'Indlæs budgetfilen igen (knappen ovenfor), så AI kan læse alle fanerne. Den nuværende blev indlæst, før denne funktion fandtes.'),
         chat,
-        h('div', { className: 'flex flex-wrap gap-2 mb-2' }, ...examples.map(x => h('button', { className: 'fin-chip', ...(budget.has_digest ? {} : { disabled: '' }), onClick: () => ask(x) }, x))),
+        h('div', { className: 'flex flex-wrap gap-2 mb-2' }, ...examples.map(x => h('button', { className: 'fin-chip', ...(ready ? {} : { disabled: '' }), onClick: () => ask(x) }, x))),
         input, h('div', { className: 'flex justify-between items-center mt-2' }, h('span', { className: 'text-xs text-gray-400' }, '⌘/Ctrl + Enter sender'), btn));
     draw();
     return card;

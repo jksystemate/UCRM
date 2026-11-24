@@ -7,6 +7,7 @@ from email.utils import parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 import re
+import hashlib
 from datetime import date, datetime, timedelta
 
 import psycopg2
@@ -331,6 +332,82 @@ def parse_balance(filename, data):
     if not lines:
         raise ValueError("Fandt ingen konti i filen. Brug saldobalancen fra e-conomic (PDF) eller en Excel/CSV med Nr., Navn, Perioden og År til dato.")
     return {"lines": lines, "period": period}
+
+
+# Valgfrit ved indlæsning: personkolonner i fraværs-/sygdomstabeller erstattes af pseudonymer
+_ABSENCE_RE = re.compile(r"syg|fravær|fravaer|timeoff|time off|absence|barsel|sick", re.I)
+_PERSON_COL_RE = re.compile(r"employee|medarbejder|person|full ?name|fornavn|efternavn|^navn$|^name$|initial|e-?mail|bruger|^user|manager|leder|godkender|cpr", re.I)
+_NOT_PERSON_COL_RE = re.compile(r"timeoff|fravær|fravaer|type|project|projekt|customer|kunde|task|opgave|department|afdeling|team", re.I)
+
+
+def _cell_text(v):
+    if v is None:
+        return ""
+    if isinstance(v, datetime):
+        return v.strftime("%Y-%m-%d %H:%M") if (v.hour or v.minute) else v.strftime("%Y-%m-%d")
+    if isinstance(v, date):
+        return v.isoformat()
+    if isinstance(v, float):
+        return str(int(v)) if v.is_integer() else repr(round(v, 6))
+    return str(v).strip().replace("\r", " ").replace("\n", " ")
+
+
+def parse_dataset(filename, data, anonymize=False):
+    """Udtræk fra Power BI, TimeLog m.fl. (Excel med en eller flere faner, eller CSV) til tabeller med overskriftsrække.
+    Returnerer [{name, columns, rows, anonymized}] hvor rows er lister af tekst."""
+    import io, csv, secrets
+    sheets = []
+    if filename.lower().endswith((".xlsx", ".xlsm")):
+        import openpyxl
+        wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
+        for ws in wb.worksheets:
+            sheets.append((ws.title, [list(r) for r in ws.iter_rows(values_only=True)]))
+    elif filename.lower().endswith((".csv", ".txt")):
+        txt = data.decode("utf-8-sig", errors="replace")
+        first = txt.split("\n", 1)[0]
+        delim = max([";", ",", "\t"], key=first.count)
+        sheets.append((re.sub(r"\.\w+$", "", filename), list(csv.reader(io.StringIO(txt), delimiter=delim))))
+    else:
+        raise ValueError("Brug Excel (.xlsx) eller CSV. Eksportér tabellerne fra Power BI (Eksportér data) i stedet for selve .pbix-filen.")
+    out = []
+    for title, table in sheets:
+        table = [[_cell_text(v) for v in r] for r in table]
+        table = [r for r in table if any(c for c in r)]
+        if len(table) < 2:
+            continue
+        # Overskriftsrækken: første række blandt de første 10, hvor mindst to celler er tekst
+        hi = next((i for i, r in enumerate(table[:10]) if sum(1 for c in r if c and not re.fullmatch(r"-?[\d.,]+", c)) >= 2), 0)
+        head = table[hi]
+        width = max(i + 1 for i, c in enumerate(head) if c)
+        columns = [c or f"Kolonne {i + 1}" for i, c in enumerate(head[:width])]
+        rows = [(r + [""] * width)[:width] for r in table[hi + 1:]]
+        if not rows:
+            continue
+        anonymized = []
+        if anonymize and (_ABSENCE_RE.search(title) or any(_ABSENCE_RE.search(c) for c in columns)
+                          or any(_ABSENCE_RE.search(r[j]) for r in rows[:500] for j in range(width) if not re.fullmatch(r"-?[\d.,: -]*", r[j]))):
+            salt = secrets.token_hex(8)  # ny nøgle pr. tabel, så pseudonymer ikke kan kobles til andre tabeller
+            for j, c in enumerate(columns):
+                if _PERSON_COL_RE.search(c) and not _NOT_PERSON_COL_RE.search(c):
+                    mapping = {}
+                    for v in sorted({r[j] for r in rows if r[j]}, key=lambda v: hashlib.sha256((salt + v).encode()).hexdigest()):
+                        mapping[v] = f"Person {len(mapping) + 1}"
+                    for r in rows:
+                        r[j] = mapping.get(r[j], "")
+                    anonymized.append(c)
+        out.append({"name": title, "columns": columns, "rows": rows, "anonymized": anonymized})
+    if not out:
+        raise ValueError("Fandt ingen tabeller med en overskriftsrække og data i filen.")
+    return out
+
+
+def _dataset_csv(columns, rows):
+    import io, csv
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(columns)
+    w.writerows(rows)
+    return buf.getvalue()
 
 
 def _goal_needs_status(g):
@@ -833,6 +910,16 @@ def init_db():
                 analysis JSONB,
                 analysis_model TEXT,
                 analyzed_at TIMESTAMP,
+                uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS finance_datasets (
+                id SERIAL PRIMARY KEY,
+                filename TEXT,
+                name TEXT NOT NULL,
+                columns JSONB NOT NULL,
+                row_count INTEGER NOT NULL,
+                anonymized JSONB DEFAULT '[]',
+                csv_gz BYTEA NOT NULL,
                 uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )""",
             "ALTER TABLE tenders ADD COLUMN IF NOT EXISTS phase TEXT",
@@ -2773,12 +2860,12 @@ class handler(BaseHTTPRequestHandler):
     def _fin_ask(self, db, question, history):
         """Spørgsmål til det aktive budget. AI har hele budgetfilen og seneste saldobalance og regner med kode (code execution)."""
         import anthropic
+        import gzip
         b = db.execute("SELECT filename, data FROM finance_budgets ORDER BY id DESC LIMIT 1").fetchone()
-        if not b:
-            raise ValueError("Indlæs et budget først")
-        digest = (b["data"] or {}).get("digest")
-        if not digest:
-            raise ValueError("Indlæs budgetfilen igen, så AI kan læse alle fanerne (den blev indlæst før denne funktion fandtes)")
+        datasets = [dict(r) for r in db.execute("SELECT * FROM finance_datasets ORDER BY id").fetchall()]
+        digest = ((b["data"] or {}).get("digest") if b else None)
+        if not digest and not datasets:
+            raise ValueError("Indlæs budgetfilen (igen) eller et dataudtræk først, så AI har noget at regne på")
         bal = db.execute("SELECT * FROM finance_balances ORDER BY period_end DESC, id DESC LIMIT 1").fetchone()
         actual = ""
         if bal:
@@ -2790,7 +2877,7 @@ class handler(BaseHTTPRequestHandler):
         system = [{"type": "text", "cache_control": {"type": "ephemeral"}, "text": (
             "Du er en erfaren økonomichef, der hjælper CEO'en i Systemate (konsulentforretning + softwareproduktet Settl) "
             "med at forstå budgettet og regne konsekvenser af beslutninger. Svar på dansk.\n\n"
-            "Data: Hele den aktive budgetfil " + (b["filename"] or "") + " som tekst. Hver fane starter med '### Fane:', hver linje er en række, "
+            "Data: Hele den aktive budgetfil " + ((b["filename"] or "") if b else "(ingen indlæst)") + " som tekst. Hver fane starter med '### Fane:', hver linje er en række, "
             "og cellerne er adskilt af |. De første rækker i en fane er overskrifter (perioder, kolonnenavne som Budget/Settl/Øvrig). "
             "Beløb er i kr. Indtægter er positive og omkostninger negative.\n\n"
             "Sådan arbejder du:\n"
@@ -2799,16 +2886,51 @@ class handler(BaseHTTPRequestHandler):
             "- Vælg rimelige forudsætninger, når spørgsmålet kræver det (fx gennemsnitlig lønomkostning pr. medarbejder inkl. pension, "
             "eller at aktiverede udviklingsomkostninger falder med lønnen), og skriv dem tydeligt.\n"
             "- Opfind ikke tal. Mangler data, så sig hvad der mangler, og regn med en tydelig antagelse, hvis det giver mening.\n"
-            "- Nævn ikke enkeltpersoners navne eller løn, medmindre CEO'en spørger direkte. Brug roller, antal og gennemsnit.\n\n"
+            "- Nævn ikke enkeltpersoners navne eller løn, medmindre CEO'en spørger direkte. Brug roller, antal og gennemsnit.\n"
+            "- Dataudtræk (fx TimeLog-timer, fravær, bankposteringer) ligger som CSV-filer i kodeværktøjets arbejdsmappe. "
+            "Læs dem med pandas (find stien med os.walk, hvis den ikke er åbenlys), og regn på hele filen, ikke kun eksemplerne. "
+            "Faktureringsgrad = fakturerbare timer / registrerede timer. Sygefravær = sygdomstimer / normtimer.\n"
+            "- CEO'en må gerne se tal pr. medarbejder (timer, fakturerbarhed, overarbejde, fravær og sygdom). Giv dem, når der spørges, "
+            "og vis ellers først det samlede billede. Fravær og sygdom er følsomme oplysninger: skriv nøgternt og uden at gætte på årsager.\n"
+            "- Hvis en tabel har pseudonymer (Person 1, Person 2 …), er navnene skjult ved indlæsning; forsøg ikke at finde ud af, hvem de er.\n\n"
             "Svarets form (markdown, ingen kodeblokke):\n"
             "1. Kort svar først (1–3 sætninger med det vigtigste tal).\n"
             "2. ## Sådan er det regnet: trin med tal, gerne en lille tabel (| kolonne | kolonne |).\n"
             "3. ## Forudsætninger og forbehold: punktliste.\n"
             "4. Evt. ## Det bør du overveje: 1–3 konsekvenser eller alternativer.\n\n"
-            "## Budgetfilen\n" + digest + actual)}]
+            "## Budgetfilen\n" + (digest or "(ingen budgetfil indlæst)") + actual + self._fin_dataset_overview(datasets))}]
         msgs = [m for m in (history or []) if m.get("role") in ("user", "assistant") and m.get("content")][-6:]
-        msgs = msgs + [{"role": "user", "content": question}]
         client = anthropic.Anthropic(timeout=270, max_retries=1)
+        # Dataudtræk lægges i kodeværktøjets container som CSV-filer. De slettes igen efter svaret.
+        file_ids = []
+        try:
+            for d in datasets:
+                fname = re.sub(r"[^A-Za-z0-9.-]+", "_", f"{d['id']}_{d['name']}")[:80] + ".csv"
+                f = client.files.upload(file=(fname, gzip.decompress(bytes(d["csv_gz"])), "text/csv"))
+                file_ids.append(f.id)
+            content = [{"type": "text", "text": question}] + [{"type": "container_upload", "file_id": fid} for fid in file_ids]
+            return self._fin_ask_run(client, system, msgs + [{"role": "user", "content": content if file_ids else question}])
+        finally:
+            for fid in file_ids:
+                try:
+                    client.files.delete(fid)
+                except Exception:
+                    pass
+
+    def _fin_dataset_overview(self, datasets):
+        """Kort beskrivelse af hvert dataudtræk (kolonner, antal rækker, eksempelrækker) til systemprompten."""
+        import gzip
+        if not datasets:
+            return ""
+        parts = ["\n\n## Dataudtræk (CSV-filer i arbejdsmappen)"]
+        for d in datasets:
+            lines = gzip.decompress(bytes(d["csv_gz"])).decode().splitlines()
+            fname = re.sub(r"[^A-Za-z0-9.-]+", "_", f"{d['id']}_{d['name']}")[:80] + ".csv"
+            anon = f" Pseudonymiserede kolonner: {', '.join(d['anonymized'])}." if d.get("anonymized") else ""
+            parts.append(f"### {fname} (fra {d['filename']}, fane {d['name']}): {d['row_count']} rækker.{anon}\n" + "\n".join(lines[:4]))
+        return "\n\n".join(parts)
+
+    def _fin_ask_run(self, client, system, msgs):
         kwargs = dict(model="claude-opus-5-5", max_tokens=16000, output_config={"effort": "medium"},
                       betas=["server-side-fallback-2026-07-01"], fallbacks="default", system=system,
                       tools=[{"type": "code_execution_20260521", "name": "code_execution"}])
@@ -2848,6 +2970,28 @@ class handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._error(502, f"AI kunne ikke svare: {e}"); return True
             self._json_response({"answer": text, "model": model})
+        elif res == "datasets" and method == "GET":
+            self._json_response([dict(r) for r in db.execute(
+                "SELECT id, filename, name, columns, row_count, anonymized, uploaded_at FROM finance_datasets ORDER BY id").fetchall()])
+        elif res == "datasets" and method == "POST":
+            import gzip
+            try:
+                tables = parse_dataset(body.get("filename") or "", base64.b64decode(body.get("data") or ""), body.get("anonymize") is True)
+            except Exception as e:
+                self._error(400, f"Kunne ikke læse filen: {e}"); return True
+            out = []
+            for t in tables:
+                # Samme fil og fane indlæst igen erstatter den gamle version
+                db.execute("DELETE FROM finance_datasets WHERE filename = %s AND name = %s", (body.get("filename"), t["name"]))
+                r = db.execute("""INSERT INTO finance_datasets (filename, name, columns, row_count, anonymized, csv_gz)
+                                  VALUES (%s,%s,%s,%s,%s,%s) RETURNING id, filename, name, columns, row_count, anonymized, uploaded_at""",
+                               (body.get("filename"), t["name"], json.dumps(t["columns"]), len(t["rows"]), json.dumps(t["anonymized"]),
+                                psycopg2.Binary(gzip.compress(_dataset_csv(t["columns"], t["rows"]).encode())))).fetchone()
+                out.append(dict(r))
+            db.commit()
+            self._json_response(out, 201)
+        elif res == "datasets" and method == "DELETE" and rid is not None:
+            db.execute("DELETE FROM finance_datasets WHERE id = %s", (rid,)); db.commit(); self._no_content()
         elif res == "budget" and method == "GET":
             r = db.execute("""SELECT id, filename, first_month, last_month, uploaded_at, (SELECT COUNT(*) FROM jsonb_object_keys(data->'accounts')) AS accounts,
                               (data ? 'digest') AS has_digest FROM finance_budgets ORDER BY id DESC LIMIT 1""").fetchone()

@@ -2662,7 +2662,7 @@ class handler(BaseHTTPRequestHandler):
         if res == "summary" and method == "GET":
             self._json_response(self._fin_summary(db))
         elif res == "budget" and method == "GET":
-            r = db.execute("SELECT id, filename, first_month, last_month, uploaded_at, jsonb_object_length(data->'accounts') AS accounts FROM finance_budgets ORDER BY id DESC LIMIT 1").fetchone()
+            r = db.execute("SELECT id, filename, first_month, last_month, uploaded_at, (SELECT COUNT(*) FROM jsonb_object_keys(data->'accounts')) AS accounts FROM finance_budgets ORDER BY id DESC LIMIT 1").fetchone()
             self._json_response(dict(r) if r else None)
         elif res == "budget" and method == "POST":
             try:

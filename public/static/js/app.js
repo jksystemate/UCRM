@@ -1,4 +1,4 @@
-import { api } from './api.js?v=53';
+import { api } from './api.js?v=54';
 
 // ─── Constants ───
 const CATEGORY_LABELS = { opkald:'Opkald', tilbud:'Tilbud', moede:'Møde', opfølgning:'Opfølgning', demo:'Demo', kontrakt:'Kontrakt', implementering:'Implementering', support:'Support', faktura:'Fakturering', budget:'Budget', generelt:'Generelt' };
@@ -270,7 +270,6 @@ function scoreColor(level) {
 function scoreBg(level) { return `badge-${level}`; }
 function sectorLabel(s) { return { el:'El', vand:'Vand', varme:'Varme', multiforsyning:'Multiforsyning', 'e-mobilitet':'E-mobilitet', spildevand:'Spildevand', affald:'Affald', gas:'Gas' }[s] || s || 'Ukendt'; }
 function tierLabel(t) { return { T1:'T1 - El+Multi', T2:'T2 - Primært El', T3:'T3 - Multi u/El', T4:'T4 - Enkelt forsyning', EM:'EM - E-mobilitet' }[t] || t || ''; }
-function tierShort(t) { return t || ''; }
 const TIER_COLORS = { T1:'bg-purple-100 text-purple-700', T2:'bg-blue-100 text-blue-700', T3:'bg-teal-100 text-teal-700', T4:'bg-gray-100 text-gray-600', EM:'bg-orange-100 text-orange-700' };
 const SERVICE_LABELS = { has_el:'El', has_gas:'Gas', has_vand:'Vand', has_varme:'Varme', has_spildevand:'Spildevand', has_affald:'Affald' };
 
@@ -1175,28 +1174,8 @@ function renderActivityFeed(activities, currentDays, currentFromDate, onPeriodCh
 }
 
 let _companiesLevelFilter = null; // set by dashboard stat card clicks
-let dashboardFilters = { sector: '', rating: '', tag: '', tier: '' };
 let scoreTableSortKey = 'rating';
 let scoreTableSortAsc = true;
-
-function applyDashboardFilter(e, allScores, tableContainer) {
-    const btn = e.target.closest('[data-filter]') || e.target;
-    const filterType = btn.getAttribute('data-filter');
-    const value = btn.getAttribute('data-value');
-    dashboardFilters[filterType] = value;
-
-    btn.parentElement.querySelectorAll(`[data-filter="${filterType}"]`).forEach(b => {
-        b.className = 'px-3 py-1 rounded-full text-sm font-medium bg-gray-100 text-gray-600 hover:bg-gray-200';
-    });
-    btn.className = `px-3 py-1 rounded-full text-sm font-medium ${filterType === 'sector' ? 'bg-gray-900' : filterType === 'tier' ? 'bg-purple-700' : 'bg-gray-700'} text-white`;
-
-    let filtered = allScores;
-    if (dashboardFilters.sector) filtered = filtered.filter(s => s.sector === dashboardFilters.sector);
-    if (dashboardFilters.rating) filtered = filtered.filter(s => s.rating === dashboardFilters.rating);
-    if (dashboardFilters.tier) filtered = filtered.filter(s => s.tier === dashboardFilters.tier);
-    if (dashboardFilters.tag) filtered = filtered.filter(s => (s.tags || []).some(t => String(t.id) === dashboardFilters.tag));
-    renderScoreTable(tableContainer, filtered);
-}
 
 function renderScoreTable(container, scores) {
     container.innerHTML = '';
@@ -2182,14 +2161,6 @@ async function renderCompanyDetail(container, id) {
     renderActivityLog(container, companyNotes, [],
         async (content) => { await api.createCompanyNote(id, { content }); router(); },
         async (noteId, content) => { await api.updateCompanyNote(noteId, { content }); router(); }
-    );
-}
-
-function scoreDetail(label, value, sub) {
-    return h('div', { className: 'bg-gray-50 rounded-lg p-3' },
-        h('div', { className: 'text-xs text-gray-500' }, label),
-        h('div', { className: 'font-semibold text-gray-900' }, value),
-        h('div', { className: 'text-xs text-gray-400' }, sub)
     );
 }
 

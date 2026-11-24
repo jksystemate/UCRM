@@ -1426,69 +1426,9 @@ class handler(BaseHTTPRequestHandler):
                     "company_notes": company_notes, "memberships": memberships, "members": members
                 })
 
-            elif path.startswith("/api/companies/") and path.count("/") == 3:
-                cid = int(path.split("/")[-1])
-                row = db.execute(
-                    """SELECT c.*, u.name AS account_manager_name
-                       FROM companies c LEFT JOIN users u ON c.account_manager_id = u.id WHERE c.id = %s""",
-                    (cid,)).fetchone()
-                if not row:
-                    return self._error(404, "Virksomhed ikke fundet")
-                self._json_response(dict(row))
-
-            elif path == "/api/contacts":
-                q = "SELECT * FROM contacts WHERE 1=1"
-                p = []
-                if "company_id" in params:
-                    q += " AND company_id = %s"; p.append(int(params["company_id"][0]))
-                if "search" in params:
-                    s = "%{}%".format(params["search"][0])
-                    q += " AND (first_name ILIKE %s OR last_name ILIKE %s OR email ILIKE %s)"; p.extend([s]*3)
-                q += " ORDER BY last_name, first_name"
-                self._json_response([dict(r) for r in db.execute(q, p or None).fetchall()])
-
-            elif path.startswith("/api/contacts/") and path.count("/") == 3:
-                cid = int(path.split("/")[-1])
-                row = db.execute("SELECT * FROM contacts WHERE id = %s", (cid,)).fetchone()
-                if not row:
-                    return self._error(404, "Kontakt ikke fundet")
-                self._json_response(dict(row))
-
-            elif path == "/api/interactions":
-                q = """SELECT i.*, c.first_name || ' ' || c.last_name AS contact_name, u.name AS user_name
-                       FROM interactions i LEFT JOIN contacts c ON i.contact_id = c.id
-                       LEFT JOIN users u ON i.user_id = u.id WHERE 1=1"""
-                p = []
-                if "contact_id" in params:
-                    q += " AND i.contact_id = %s"; p.append(int(params["contact_id"][0]))
-                if "company_id" in params:
-                    q += " AND c.company_id = %s"; p.append(int(params["company_id"][0]))
-                if "type" in params:
-                    q += " AND i.type = %s"; p.append(params["type"][0])
-                q += " ORDER BY i.date DESC"
-                self._json_response([dict(r) for r in db.execute(q, p or None).fetchall()])
-
             elif path == "/api/users":
                 self._json_response([dict(r) for r in db.execute(
                     "SELECT * FROM users WHERE deleted_at IS NULL ORDER BY name").fetchall()])
-
-            elif path == "/api/emails":
-                q = """SELECT e.* FROM emails e LEFT JOIN interactions i ON e.interaction_id = i.id
-                       LEFT JOIN contacts c ON i.contact_id = c.id WHERE 1=1"""
-                p = []
-                if "contact_id" in params:
-                    q += " AND i.contact_id = %s"; p.append(int(params["contact_id"][0]))
-                if "company_id" in params:
-                    q += " AND c.company_id = %s"; p.append(int(params["company_id"][0]))
-                q += " ORDER BY e.date_sent DESC"
-                self._json_response([dict(r) for r in db.execute(q, p or None).fetchall()])
-
-            elif path.startswith("/api/emails/") and path.count("/") == 3:
-                eid = int(path.split("/")[-1])
-                row = db.execute("SELECT * FROM emails WHERE id = %s", (eid,)).fetchone()
-                if not row:
-                    return self._error(404, "Email ikke fundet")
-                self._json_response(dict(row))
 
             elif path == "/api/search":
                 q = params.get("q", [""])[0]
@@ -1535,28 +1475,10 @@ class handler(BaseHTTPRequestHandler):
                 q += " ORDER BY CASE t.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END, t.due_date ASC NULLS LAST, t.created_at DESC"
                 self._json_response([dict(r) for r in db.execute(q, p or None).fetchall()])
 
-            elif path == "/api/tasks/summary":
-                rows = db.execute("SELECT status, COUNT(*) AS cnt FROM tasks GROUP BY status").fetchall()
-                summary = {"open": 0, "in_progress": 0, "done": 0}
-                for r in rows:
-                    summary[r["status"]] = r["cnt"]
-                overdue = db.execute(
-                    "SELECT COUNT(*) AS cnt FROM tasks WHERE due_date < CURRENT_DATE AND status != 'done'").fetchone()["cnt"]
-                this_week = db.execute(
-                    "SELECT COUNT(*) AS cnt FROM tasks WHERE due_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days' AND status != 'done'").fetchone()["cnt"]
-                summary["overdue"] = overdue
-                summary["this_week"] = this_week
-                self._json_response(summary)
-
             elif path.startswith("/api/tasks/") and path.endswith("/notes"):
                 tid = int(path.split("/")[-2])
                 self._json_response([dict(r) for r in db.execute(
                     "SELECT * FROM task_notes WHERE task_id = %s ORDER BY created_at DESC", (tid,)).fetchall()])
-
-            elif path.startswith("/api/companies/") and path.endswith("/notes") and path.count("/") == 4:
-                cid = int(path.split("/")[-2])
-                self._json_response([dict(r) for r in db.execute(
-                    "SELECT * FROM company_notes WHERE company_id = %s ORDER BY created_at DESC", (cid,)).fetchall()])
 
             elif path.startswith("/api/tasks/") and path.endswith("/history"):
                 tid = int(path.split("/")[-2])
@@ -1592,20 +1514,6 @@ class handler(BaseHTTPRequestHandler):
                     "SELECT * FROM audit_log WHERE entity_type = 'tender' AND entity_id = %s ORDER BY created_at DESC",
                     (tid,)).fetchall()])
 
-            elif path == "/api/audit-log":
-                q = "SELECT * FROM audit_log WHERE 1=1"
-                p = []
-                if "entity_type" in params:
-                    q += " AND entity_type = %s"; p.append(params["entity_type"][0])
-                if "entity_id" in params:
-                    q += " AND entity_id = %s"; p.append(int(params["entity_id"][0]))
-                if "user_id" in params:
-                    q += " AND user_id = %s"; p.append(int(params["user_id"][0]))
-                q += " ORDER BY created_at DESC"
-                limit = int(params.get("limit", ["50"])[0])
-                q += " LIMIT %s"; p.append(limit)
-                self._json_response([dict(r) for r in db.execute(q, p).fetchall()])
-
             elif path == "/api/notifications":
                 q = "SELECT n.*, COALESCE(n.title, c.name) AS company_name FROM notifications n LEFT JOIN companies c ON n.company_id = c.id WHERE 1=1"
                 p = []
@@ -1632,36 +1540,6 @@ class handler(BaseHTTPRequestHandler):
             elif path == "/api/settings/decay-rules":
                 self._json_response([dict(r) for r in db.execute(
                     "SELECT * FROM score_decay_rules ORDER BY inactivity_days").fetchall()])
-
-            elif path == "/api/linkedin-activities":
-                q = """SELECT la.*, c.first_name || ' ' || c.last_name AS contact_name, u.name AS observed_by_name,
-                       co.id AS company_id, co.name AS company_name
-                       FROM linkedin_activities la JOIN contacts c ON la.contact_id = c.id
-                       JOIN companies co ON c.company_id = co.id
-                       LEFT JOIN users u ON la.observed_by = u.id WHERE 1=1"""
-                p = []
-                if "contact_id" in params:
-                    q += " AND la.contact_id = %s"; p.append(int(params["contact_id"][0]))
-                if "company_id" in params:
-                    q += " AND co.id = %s"; p.append(int(params["company_id"][0]))
-                q += " ORDER BY la.activity_date DESC LIMIT 50"
-                self._json_response([dict(r) for r in db.execute(q, p or None).fetchall()])
-
-            elif path == "/api/linkedin-engagements":
-                q = """SELECT le.*, c.first_name || ' ' || c.last_name AS contact_name, u.name AS observed_by_name,
-                       co.id AS company_id, co.name AS company_name
-                       FROM linkedin_engagements le JOIN contacts c ON le.contact_id = c.id
-                       JOIN companies co ON c.company_id = co.id
-                       LEFT JOIN users u ON le.observed_by = u.id WHERE 1=1"""
-                p = []
-                if "contact_id" in params:
-                    q += " AND le.contact_id = %s"; p.append(int(params["contact_id"][0]))
-                if "company_id" in params:
-                    q += " AND co.id = %s"; p.append(int(params["company_id"][0]))
-                if "company_page" in params:
-                    q += " AND le.company_page = %s"; p.append(params["company_page"][0])
-                q += " ORDER BY le.observed_date DESC LIMIT 50"
-                self._json_response([dict(r) for r in db.execute(q, p or None).fetchall()])
 
             elif path == "/api/score-history/aggregate":
                 rows = db.execute("""
@@ -1833,51 +1711,6 @@ class handler(BaseHTTPRequestHandler):
                                      "recent_activities": recent_activities, "active_tenders": active_tenders,
                                      "active_tasks": active_tasks, "tender_summary": tender_summary,
                                      "tasks_done_30d": tasks_done_30d})
-
-            elif path == "/api/dashboard/scores":
-                scores = calculate_all_scores(db)
-                sector = params.get("sector", [None])[0]
-                if sector:
-                    scores = [s for s in scores if s["sector"] == sector]
-                rating = params.get("rating", [None])[0]
-                if rating:
-                    scores = [s for s in scores if s.get("rating") == rating]
-                sort_by = params.get("sort_by", ["score"])[0]
-                if sort_by == "score":
-                    scores.sort(key=lambda s: s["score"], reverse=True)
-                elif sort_by == "name":
-                    scores.sort(key=lambda s: s["company_name"])
-                self._json_response(scores)
-
-            elif path.startswith("/api/dashboard/scores/"):
-                cid = int(path.split("/")[-1])
-                result = calculate_company_score(cid)
-                if not result:
-                    return self._error(404, "Virksomhed ikke fundet")
-                self._json_response(result)
-
-            elif path == "/api/dashboard/stats":
-                scores = calculate_all_scores(db)
-                total = len(scores)
-                if total == 0:
-                    self._json_response({"total": 0, "strong": 0, "good": 0, "weak": 0, "cold": 0, "avg_score": 0})
-                else:
-                    self._json_response({
-                        "total": total,
-                        "strong": sum(1 for s in scores if s["level"] == "staerk"),
-                        "good": sum(1 for s in scores if s["level"] == "god"),
-                        "weak": sum(1 for s in scores if s["level"] == "svag"),
-                        "cold": sum(1 for s in scores if s["level"] == "kold"),
-                        "avg_score": round(sum(s["score"] for s in scores) / total, 1),
-                    })
-
-            elif path == "/api/tags":
-                rows = db.execute(
-                    """SELECT t.*,
-                       (SELECT COUNT(*) FROM company_tags WHERE tag_id = t.id) +
-                       (SELECT COUNT(*) FROM contact_tags WHERE tag_id = t.id) AS usage_count
-                       FROM tags t ORDER BY t.name""").fetchall()
-                self._json_response([dict(r) for r in rows])
 
             elif path == "/api/tenders":
                 q = """SELECT t.*, c.name AS company_name, g.name AS via_group_name,
@@ -2543,38 +2376,6 @@ class handler(BaseHTTPRequestHandler):
                 db.commit()
                 if row:
                     log_audit(db, uid, "deactivate", "user", uid_del, row["name"])
-                    db.commit()
-                self._no_content()
-
-            elif path.startswith("/api/tasks/") and path.count("/") == 3:
-                tid = int(path.split("/")[-1])
-                row = db.execute("SELECT title FROM tasks WHERE id = %s", (tid,)).fetchone()
-                db.execute("DELETE FROM tasks WHERE id = %s", (tid,))
-                db.commit()
-                if row:
-                    log_audit(db, uid, "delete", "task", tid, row["title"])
-                    db.commit()
-                self._no_content()
-
-            elif path.startswith("/api/linkedin-activities/") and path.count("/") == 3:
-                lid = int(path.split("/")[-1])
-                db.execute("DELETE FROM linkedin_activities WHERE id = %s", (lid,))
-                db.commit()
-                self._no_content()
-
-            elif path.startswith("/api/linkedin-engagements/") and path.count("/") == 3:
-                lid = int(path.split("/")[-1])
-                db.execute("DELETE FROM linkedin_engagements WHERE id = %s", (lid,))
-                db.commit()
-                self._no_content()
-
-            elif path.startswith("/api/tags/") and path.count("/") == 3:
-                tid = int(path.split("/")[-1])
-                row = db.execute("SELECT name FROM tags WHERE id = %s", (tid,)).fetchone()
-                db.execute("DELETE FROM tags WHERE id = %s", (tid,))
-                db.commit()
-                if row:
-                    log_audit(db, uid, "delete", "tag", tid, row["name"])
                     db.commit()
                 self._no_content()
 

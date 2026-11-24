@@ -23,35 +23,20 @@ export const api = {
         const qs = new URLSearchParams(params).toString();
         return request(`/companies${qs ? '?' + qs : ''}`);
     },
-    getCompany: (id) => request(`/companies/${id}`),
     createCompany: (data) => request('/companies', { method: 'POST', body: JSON.stringify(data) }),
     updateCompany: (id, data) => request(`/companies/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
     deleteCompany: (id) => request(`/companies/${id}`, { method: 'DELETE' }),
 
     // Contacts
-    getContacts: (params = {}) => {
-        const qs = new URLSearchParams(params).toString();
-        return request(`/contacts${qs ? '?' + qs : ''}`);
-    },
-    getContact: (id) => request(`/contacts/${id}`),
     createContact: (data) => request('/contacts', { method: 'POST', body: JSON.stringify(data) }),
     updateContact: (id, data) => request(`/contacts/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
     deleteContact: (id) => request(`/contacts/${id}`, { method: 'DELETE' }),
 
     // Interactions
-    getInteractions: (params = {}) => {
-        const qs = new URLSearchParams(params).toString();
-        return request(`/interactions${qs ? '?' + qs : ''}`);
-    },
     createInteraction: (data) => request('/interactions', { method: 'POST', body: JSON.stringify(data) }),
     deleteInteraction: (id) => request(`/interactions/${id}`, { method: 'DELETE' }),
 
     // Emails
-    getEmails: (params = {}) => {
-        const qs = new URLSearchParams(params).toString();
-        return request(`/emails${qs ? '?' + qs : ''}`);
-    },
-    getEmail: (id) => request(`/emails/${id}`),
     uploadEmail: async (file, contactId, userId) => {
         const formData = new FormData();
         formData.append('file', file);
@@ -84,12 +69,6 @@ export const api = {
     getScoreHistoryAggregate: () => request('/score-history/aggregate'),
 
     // Dashboard
-    getScores: (params = {}) => {
-        const qs = new URLSearchParams(params).toString();
-        return request(`/dashboard/scores${qs ? '?' + qs : ''}`);
-    },
-    getCompanyScore: (id) => request(`/dashboard/scores/${id}`),
-    getStats: () => request('/dashboard/stats'),
 
     // Search
     search: (q) => request(`/search?q=${encodeURIComponent(q)}`),
@@ -102,8 +81,6 @@ export const api = {
     getTask: (id) => request(`/tasks/${id}`),
     createTask: (data) => request('/tasks', { method: 'POST', body: JSON.stringify(data) }),
     updateTask: (id, data) => request(`/tasks/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
-    deleteTask: (id) => request(`/tasks/${id}`, { method: 'DELETE' }),
-    getTaskSummary: () => request('/tasks/summary'),
     getTaskNotes: (id) => request(`/tasks/${id}/notes`),
     createTaskNote: (id, data) => request(`/tasks/${id}/notes`, { method: 'POST', body: JSON.stringify(data) }),
     updateTaskNote: (id, data) => request(`/task-notes/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
@@ -127,7 +104,6 @@ export const api = {
     updateTag: (id, data) => request(`/tags/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
 
     // Company notes
-    getCompanyNotes: (id) => request(`/companies/${id}/notes`),
     createCompanyNote: (id, data) => request(`/companies/${id}/notes`, { method: 'POST', body: JSON.stringify(data) }),
     updateCompanyNote: (id, data) => request(`/company-notes/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
 
@@ -139,10 +115,6 @@ export const api = {
     getTenderPhases: (id) => request(`/tenders/${id}/phases`),
 
     // Audit log
-    getAuditLog: (params = {}) => {
-        const qs = new URLSearchParams(params).toString();
-        return request(`/audit-log${qs ? '?' + qs : ''}`);
-    },
 
     // Notifications
     getNotifications: (params = {}) => {
@@ -160,25 +132,13 @@ export const api = {
     updateScoreThresholds: (data) => request('/settings/score-thresholds', { method: 'PUT', body: JSON.stringify(data) }),
 
     // LinkedIn activities
-    getLinkedInActivities: (params = {}) => {
-        const qs = new URLSearchParams(params).toString();
-        return request(`/linkedin-activities${qs ? '?' + qs : ''}`);
-    },
     createLinkedInActivity: (data) => request('/linkedin-activities', { method: 'POST', body: JSON.stringify(data) }),
-    deleteLinkedInActivity: (id) => request(`/linkedin-activities/${id}`, { method: 'DELETE' }),
 
     // LinkedIn engagements
-    getLinkedInEngagements: (params = {}) => {
-        const qs = new URLSearchParams(params).toString();
-        return request(`/linkedin-engagements${qs ? '?' + qs : ''}`);
-    },
     createLinkedInEngagement: (data) => request('/linkedin-engagements', { method: 'POST', body: JSON.stringify(data) }),
-    deleteLinkedInEngagement: (id) => request(`/linkedin-engagements/${id}`, { method: 'DELETE' }),
 
     // Tags
-    getTags: () => request('/tags'),
     createTag: (data) => request('/tags', { method: 'POST', body: JSON.stringify(data) }),
-    deleteTag: (id) => request(`/tags/${id}`, { method: 'DELETE' }),
     addCompanyTag: (companyId, tagId) => request(`/companies/${companyId}/tags`, { method: 'POST', body: JSON.stringify({ tag_id: tagId }) }),
     removeCompanyTag: (companyId, tagId) => request(`/companies/${companyId}/tags/${tagId}`, { method: 'DELETE' }),
     addContactTag: (contactId, tagId) => request(`/contacts/${contactId}/tags`, { method: 'POST', body: JSON.stringify({ tag_id: tagId }) }),
@@ -194,11 +154,9 @@ export const api = {
     updateTender: (id, data) => request(`/tenders/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
     deleteTender: (id) => request(`/tenders/${id}`, { method: 'DELETE' }),
 
-
     // Decay rules
     getDecayRules: () => request('/settings/decay-rules'),
     updateDecayRules: (data) => request('/settings/decay-rules', { method: 'PUT', body: JSON.stringify(data) }),
-
 
     // SystemateCEO: mål, ledermøder og aktioner
     getCeoOverview: () => request('/ceo/overview'),

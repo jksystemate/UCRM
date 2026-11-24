@@ -1,4 +1,4 @@
-import { api } from './api.js?v=50';
+import { api } from './api.js?v=51';
 
 // ─── Constants ───
 const CATEGORY_LABELS = { opkald:'Opkald', tilbud:'Tilbud', moede:'Møde', opfølgning:'Opfølgning', demo:'Demo', kontrakt:'Kontrakt', implementering:'Implementering', support:'Support', faktura:'Fakturering', budget:'Budget', generelt:'Generelt' };
@@ -6362,12 +6362,9 @@ function renderFollowupPanel(fu, users) {
             sm.pending ? h('div', { className: 'fu-pending' }, 'Forespørgsel klar, men ikke sendt',
                 h('button', { className: 'act-btn ml-2', onClick: () => showFollowupMessage({ ...sm.pending, link: `${location.origin}/r/${sm.pending.token}`, tasks: [] }, fu) }, 'Vis besked')) : null,
             h('div', { className: 'flex items-center justify-between gap-2' },
-                h('button', { className: 'act-btn primary', ...(sm.open ? {} : { disabled: '' }), onClick: async (e) => {
+                h('button', { className: 'act-btn primary', ...((sm.tasks || []).length ? {} : { disabled: '' }), onClick: () => {
                     if (!fu.role_users[role]) { alert(`Vælg først hvem der er ${role}.`); return; }
-                    e.target.disabled = true; e.target.textContent = 'Skriver besked…';
-                    try { showFollowupMessage(await api.requestTaskStatus(role), fu); }
-                    catch (err) { alert(err.message); }
-                    e.target.disabled = false; e.target.textContent = 'Bed om status nu';
+                    pickFollowupTasks(role, sm.tasks || [], fu);
                 } }, 'Bed om status nu'),
                 h('label', { className: 'flex items-center gap-1 text-xs text-gray-600', title: fu.slack ? 'Sender i Slack hver hverdagsmorgen, når opgaver halter (højst hver 3. dag)' : 'Uden Slack laves forespørgslen, og du får besked i klokken med beskeden klar' },
                     auto, 'AI følger op automatisk'))));
@@ -6375,6 +6372,30 @@ function renderFollowupPanel(fu, users) {
     box.appendChild(grid);
     if (!fu.slack) box.appendChild(h('div', { className: 'text-xs text-gray-500 mt-2' }, 'Slack er ikke sat op: automatisk opfølgning laver forespørgslen og giver dig besked i klokken, så du kan sende den.'));
     return box;
+}
+
+// CEO'en vælger, hvilke af lederens opgaver der skal spørges om. Opgaver der halter er valgt på forhånd.
+function pickFollowupTasks(role, tasks, fu) {
+    const anyFlagged = tasks.some(t => t.flagged);
+    const boxes = tasks.map(t => ({ t, cb: h('input', { type: 'checkbox', className: 'mt-1', ...(t.flagged || !anyFlagged ? { checked: '' } : {}) }) }));
+    const err = h('div', { className: 'text-sm text-red-600' });
+    const go = h('button', { className: 'act-btn primary', onClick: async () => {
+        const ids = boxes.filter(b => b.cb.checked).map(b => b.t.id);
+        if (!ids.length) { err.textContent = 'Vælg mindst én opgave.'; return; }
+        go.disabled = true; go.textContent = 'Skriver besked…';
+        try { showFollowupMessage(await api.requestTaskStatus(role, false, ids), fu); }
+        catch (e) { err.textContent = e.message; go.disabled = false; go.textContent = 'Skriv besked'; }
+    } }, 'Skriv besked');
+    showModal(`Hvilke opgaver vil du have status på? (${role})`, h('div', { className: 'space-y-3' },
+        h('p', { className: 'text-sm text-gray-600' }, 'Sæt flueben ved de opgaver, beskeden skal handle om. Der bliver ikke sendt noget endnu: du ser beskeden først.'),
+        h('div', { className: 'space-y-2' }, ...boxes.map(({ t, cb }) => h('label', { className: 'flex gap-2 items-start p-2 border border-gray-200 rounded-lg cursor-pointer hover:bg-gray-50' }, cb,
+            h('div', { className: 'flex-1' },
+                h('div', { className: 'text-sm font-medium text-gray-900' }, t.title),
+                h('div', { className: 'text-xs text-gray-500' }, [t.due_date ? `frist ${formatDate(t.due_date)}` : 'ingen frist', t.why].filter(Boolean).join(' · '))),
+            t.flagged ? h('span', { className: 'text-xs font-semibold text-red-600' }, 'Halter') : null))),
+        err,
+        h('div', { className: 'flex gap-2 justify-end' },
+            h('button', { className: 'px-4 py-2 text-gray-600', onClick: closeModal }, 'Annuller'), go)));
 }
 
 function showFollowupMessage(res, fu) {

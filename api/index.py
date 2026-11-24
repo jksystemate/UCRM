@@ -3438,8 +3438,14 @@ class handler(BaseHTTPRequestHandler):
         lines.append(f"Meld gerne status her, det tager et minut: {link}")
         return "\n".join(lines)
 
-    def _create_task_status_request(self, db, role, base_url, send_slack=False, auto=False):
-        """Opretter en statusforespørgsel kun om lederens opgaver og en besked til lederen."""
+    def _role_tasks(self, tf, role, user):
+        """Lederens åbne opgaver: ejer er rollen (fx 'CFO') eller lederens fornavn."""
+        first = user["name"].split(" ")[0].lower() if user else "§"
+        return [t for t in tf if t["role"] == role or (t["owner"] or "").lower().startswith(first)]
+
+    def _create_task_status_request(self, db, role, base_url, send_slack=False, auto=False, task_ids=None):
+        """Opretter en statusforespørgsel kun om lederens opgaver og en besked til lederen.
+        task_ids: kun de opgaver, CEO'en har valgt (ellers alle lederens åbne opgaver)."""
         import secrets
         cfg = self._followup_settings(db)
         uid = cfg["role_users"].get(role)
@@ -3447,16 +3453,19 @@ class handler(BaseHTTPRequestHandler):
         if not user:
             raise ValueError(f"Vælg hvem der er {role} under Opgaver")
         area = self.ROLE_AREA[role]
-        tasks = [t for t in self._task_followups(db) if t["role"] == role or (t["owner"] or "").lower().startswith(user["name"].split(" ")[0].lower())]
+        tasks = self._role_tasks(self._task_followups(db), role, user)
+        if task_ids:
+            tasks = [t for t in tasks if t["id"] in task_ids]
         if not tasks:
-            raise ValueError(f"{role} har ingen åbne opgaver")
+            raise ValueError("Vælg mindst én opgave" if task_ids else f"{role} har ingen åbne opgaver")
         cur = db.execute("""INSERT INTO report_rounds (area, respondent_user_id, respondent_name, token, due_date, status)
                             VALUES (%s,%s,%s,%s,%s,'open') RETURNING id, token""",
                          (area, user["id"], user["name"], secrets.token_urlsafe(24), (date.today() + timedelta(days=2)).isoformat()))
         row = cur.fetchone()
-        self._build_report_items(db, row["id"], area, user["id"], tasks_only=True)
+        self._build_report_items(db, row["id"], area, user["id"], tasks_only=True, task_ids=[t["id"] for t in tasks] if task_ids else None)
         link = f"{base_url.rstrip('/')}/r/{row['token']}"
-        flagged = [t for t in tasks if any(sv in ("kritisk", "vigtig") for sv, _ in t["signals"])] or tasks
+        # Har CEO'en selv valgt opgaverne, handler beskeden om dem alle
+        flagged = tasks if task_ids else ([t for t in tasks if any(sv in ("kritisk", "vigtig") for sv, _ in t["signals"])] or tasks)
         message = self._draft_followup_message(db, role, user["name"], flagged, link)
         db.execute("UPDATE report_rounds SET message = %s WHERE id = %s", (message, row["id"]))
         sent = False
@@ -3489,7 +3498,13 @@ class handler(BaseHTTPRequestHandler):
                               ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP""", (json.dumps(cfg),))
                 db.commit()
             tf = self._task_followups(db)
+            role_user = {r: db.execute("SELECT id, name FROM users WHERE id = %s", (cfg["role_users"].get(r),)).fetchone() if cfg["role_users"].get(r) else None
+                         for r in ("CCO", "COO", "CFO")}
             summary = {r: {"open": sum(1 for t in tf if t["role"] == r),
+                           "tasks": [{"id": t["id"], "title": t["title"], "due_date": t["due_date"],
+                                      "flagged": any(sv in ("kritisk", "vigtig") for sv, _ in t["signals"]),
+                                      "why": ", ".join(x[1] for x in t["signals"] if x[0] in ("kritisk", "vigtig"))}
+                                     for t in self._role_tasks(tf, r, role_user[r])],
                            "flagged": sum(1 for t in tf if t["role"] == r and any(sv in ("kritisk", "vigtig") for sv, _ in t["signals"])),
                            "last_request": (lambda x: x["created_at"].date().isoformat() if x else None)(db.execute(
                                """SELECT created_at FROM report_rounds WHERE respondent_user_id = %s AND area = %s
@@ -3505,7 +3520,8 @@ class handler(BaseHTTPRequestHandler):
                                  "ai": bool(os.environ.get("ANTHROPIC_API_KEY"))})
         elif path == "/api/ceo/followup" and method == "POST":
             try:
-                res = self._create_task_status_request(db, body.get("role"), body.get("origin") or base, send_slack=bool(body.get("send_slack")))
+                res = self._create_task_status_request(db, body.get("role"), body.get("origin") or base, send_slack=bool(body.get("send_slack")),
+                                                       task_ids=[int(x) for x in body.get("task_ids") or []] or None)
             except ValueError as e:
                 db.rollback(); self._error(400, str(e)); return True
             self._json_response(res, 201)
@@ -3811,7 +3827,7 @@ class handler(BaseHTTPRequestHandler):
         score += 1 if not ctx.get("last_contact") else 0
         return score
 
-    def _build_report_items(self, db, round_id, area, respondent_user_id=None, company_ids=None, only_customers=False, tasks_only=False):
+    def _build_report_items(self, db, round_id, area, respondent_user_id=None, company_ids=None, only_customers=False, tasks_only=False, task_ids=None):
         """Laver indrapporteringen ud fra data. Bedste svarform først: hurtige klik-lister til det, alle kunder skal svare på,
         grundige spørgsmål kun til de vigtigste kunder, og emner der blev udskudt sidst kommer med igen."""
         items = []
@@ -3924,6 +3940,8 @@ class handler(BaseHTTPRequestHandler):
             first = (resp["name"].split(" ")[0] if resp else None)
             tasks_open = self._action_rows(db, "AND a.status = 'open' AND a.kind = 'aktion' AND (a.owner ILIKE %s OR a.owner ILIKE %s)",
                                            (role + "%", (first or "§") + "%"))
+            if task_ids:
+                tasks_open = [t for t in tasks_open if t["id"] in task_ids]
             if tasks_open:
                 items.append(("matrix", None, None, None, "Dine opgaver: hvordan står det til?",
                               {"target": "tasks", "input": "choice",

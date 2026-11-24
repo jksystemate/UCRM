@@ -245,7 +245,7 @@ export const api = {
     },
     getFollowupSettings: () => request('/ceo/followup-settings'),
     saveFollowupSettings: (data) => request('/ceo/followup-settings', { method: 'PUT', body: JSON.stringify(data) }),
-    requestTaskStatus: (role, sendSlack = false) => request('/ceo/followup', { method: 'POST', body: JSON.stringify({ role, send_slack: sendSlack, origin: location.origin }) }),
+    requestTaskStatus: (role, sendSlack = false, taskIds = null) => request('/ceo/followup', { method: 'POST', body: JSON.stringify({ role, send_slack: sendSlack, origin: location.origin, task_ids: taskIds }) }),
     breakdownTask: (data) => request('/actions/breakdown', { method: 'POST', body: JSON.stringify(data) }),
     createAction: (data) => request('/actions', { method: 'POST', body: JSON.stringify(data) }),
     updateAction: (id, data) => request(`/actions/${id}`, { method: 'PUT', body: JSON.stringify(data) }),

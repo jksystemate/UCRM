@@ -1037,6 +1037,11 @@ def init_db():
             "ALTER TABLE finance_datasets ADD COLUMN IF NOT EXISTS import_id INTEGER REFERENCES finance_imports(id) ON DELETE CASCADE",
             "ALTER TABLE finance_datasets ADD COLUMN IF NOT EXISTS dropped JSONB DEFAULT '[]'",
             "ALTER TABLE finance_datasets ADD COLUMN IF NOT EXISTS file_id TEXT",
+            """CREATE TABLE IF NOT EXISTS finance_ai_files (
+                key TEXT PRIMARY KEY,
+                file_id TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
             """CREATE TABLE IF NOT EXISTS finance_upload_chunks (
                 upload_id TEXT NOT NULL,
                 idx INTEGER NOT NULL,
@@ -3010,8 +3015,8 @@ class handler(BaseHTTPRequestHandler):
             "eller at aktiverede udviklingsomkostninger falder med lønnen), og skriv dem tydeligt.\n"
             "- Opfind ikke tal. Mangler data, så sig hvad der mangler, og regn med en tydelig antagelse, hvis det giver mening.\n"
             "- Nævn ikke enkeltpersoners navne eller løn, medmindre CEO'en spørger direkte. Brug roller, antal og gennemsnit.\n"
-            "- Dataudtræk (fx TimeLog-timer, fravær, bankposteringer) ligger som CSV-filer i kodeværktøjets arbejdsmappe. "
-            "Læs dem med pandas (find stien med os.walk, hvis den ikke er åbenlys), og regn på hele filen, ikke kun eksemplerne. "
+            "- Dataudtræk (fx TimeLog-timer, fravær, bankposteringer) ligger samlet i data.zip i kodeværktøjets arbejdsmappe "
+            "(find stien med os.walk). Pak den ud med zipfile, og læs de enkelte .csv.gz-filer med pandas.read_csv. Regn på hele filen, ikke kun eksemplerne. "
             "Faktureringsgrad = fakturerbare timer / registrerede timer. Sygefravær = sygdomstimer / normtimer.\n"
             "- CEO'en må gerne se tal pr. medarbejder (timer, fakturerbarhed, overarbejde, fravær og sygdom). Giv dem, når der spørges, "
             "og vis ellers først det samlede billede. Fravær og sygdom er følsomme oplysninger: skriv nøgternt og uden at gætte på årsager.\n"
@@ -3024,30 +3029,43 @@ class handler(BaseHTTPRequestHandler):
             "## Budgetfilen\n" + (digest or "(ingen budgetfil indlæst)") + actual + self._fin_dataset_overview(datasets, pbix))}]
         msgs = [m for m in (history or []) if m.get("role") in ("user", "assistant") and m.get("content")][-6:]
         client = anthropic.Anthropic(timeout=270, max_retries=1)
-        # Dataudtræk ligger som komprimerede CSV-filer hos Anthropic (uploades første gang, de bruges) og lægges i kodeværktøjets container
+        # Alle dataudtræk samles i én zip-fil hos Anthropic (højst 16 filer pr. forespørgsel). Den uploades første gang,
+        # og genbruges, så længe de samme data er aktive
         for attempt in range(2):
-            content = [{"type": "text", "text": question}] + [
-                {"type": "container_upload", "file_id": self._fin_file_id(db, client, d)} for d in datasets]
+            content = [{"type": "text", "text": question}]
+            if datasets:
+                content.append({"type": "container_upload", "file_id": self._fin_bundle_id(db, client, datasets)})
             try:
                 return self._fin_ask_run(client, system, msgs + [{"role": "user", "content": content if datasets else question}])
             except anthropic.APIStatusError as e:
-                # En fil kan være slettet hos Anthropic: upload forfra én gang
+                # Filen kan være slettet hos Anthropic: upload forfra én gang
                 if attempt or not datasets or "file" not in str(e).lower():
                     raise
-                db.execute("UPDATE finance_datasets SET file_id = NULL WHERE id = ANY(%s)", ([d["id"] for d in datasets],)); db.commit()
-                for d in datasets:
-                    d["file_id"] = None
+                db.execute("DELETE FROM finance_ai_files"); db.commit()
+
+    def _fin_bundle_id(self, db, client, datasets):
+        """Zip med alle aktive tabeller (.csv.gz). Nøglen skifter, når en tabel tilføjes, erstattes eller slettes."""
+        import io, zipfile
+        key = hashlib.sha256("|".join(f"{d['id']}:{d['uploaded_at']}" for d in datasets).encode()).hexdigest()
+        row = db.execute("SELECT file_id FROM finance_ai_files WHERE key = %s", (key,)).fetchone()
+        if row:
+            return row["file_id"]
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as z:
+            for d in datasets:
+                z.writestr(self._fin_file_name(d), bytes(d["csv_gz"]))
+        f = client.files.upload(file=("data.zip", buf.getvalue(), "application/zip"))
+        old = [r["file_id"] for r in db.execute("DELETE FROM finance_ai_files RETURNING file_id").fetchall()]
+        # Enkeltfiler fra den tidligere løsning ryddes op
+        old += [r["file_id"] for r in db.execute(
+            "UPDATE finance_datasets d SET file_id = NULL FROM finance_datasets o WHERE o.id = d.id AND o.file_id IS NOT NULL RETURNING o.file_id").fetchall()]
+        db.execute("INSERT INTO finance_ai_files (key, file_id) VALUES (%s, %s)", (key, f.id)); db.commit()
+        self._fin_delete_files(old)
+        return f.id
 
     @staticmethod
     def _fin_file_name(d):
         return re.sub(r"[^A-Za-z0-9.-]+", "_", f"{d['id']}_{d['name']}")[:80] + ".csv.gz"
-
-    def _fin_file_id(self, db, client, d):
-        if not d.get("file_id"):
-            f = client.files.upload(file=(self._fin_file_name(d), bytes(d["csv_gz"]), "application/gzip"))
-            d["file_id"] = f.id
-            db.execute("UPDATE finance_datasets SET file_id = %s WHERE id = %s", (f.id, d["id"])); db.commit()
-        return d["file_id"]
 
     @staticmethod
     def _fin_active_datasets(db):
@@ -3073,7 +3091,7 @@ class handler(BaseHTTPRequestHandler):
         import gzip
         if not datasets:
             return ""
-        parts = ["\n\n## Dataudtræk (komprimerede CSV-filer, .csv.gz, i arbejdsmappen; læs med pandas.read_csv)"]
+        parts = ["\n\n## Dataudtræk (komprimerede CSV-filer, .csv.gz, samlet i data.zip i arbejdsmappen; pak ud og læs med pandas.read_csv)"]
         if pbix:
             parts.append(f"Tabeller markeret 'Power BI' kommer fra {pbix['filename']}, data opdateret {pbix['refreshed_at']}. "
                          "Prefikset i tabelnavnet viser kilden: 'TL:' = TimeLog (tidsregistrering, fravær, normtid, medarbejdere), "

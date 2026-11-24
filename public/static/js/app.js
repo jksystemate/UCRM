@@ -914,15 +914,47 @@ const fileToBase64 = file => new Promise((res, rej) => {
     r.readAsDataURL(file);
 });
 
+let _finReopenData = false; // genåbn "Nye data" efter en indlæsning, så flere filer kan indlæses i træk
 async function renderFinance(container) {
     container.innerHTML = '<div class="text-gray-400">Indlæser...</div>';
     const [budget, balances, datasets, pbix] = await Promise.all([api.getFinanceBudget(), api.getFinanceBalances(), api.getFinanceDatasets(), api.getPbix()]);
     container.innerHTML = '';
     container.className = 'ml-64 p-8 fade-in';
-    container.appendChild(h('div', { className: 'mb-6' },
-        h('h1', { className: 'text-2xl font-bold text-gray-900' }, 'Budget & regnskab'),
-        h('p', { className: 'text-gray-500 mt-1' }, 'Indlæs budgettet og månedens saldobalance fra e-conomic. Appen sammenligner med budgettet, og AI peger på afvigelser og ting, der undrer.')));
+    const openData = () => showModal('Nye data', financeDataPanel(budget, datasets, pbix), 'max-w-3xl');
+    container.appendChild(h('div', { className: 'flex items-start justify-between gap-4 mb-4' },
+        h('div', {},
+            h('h1', { className: 'text-2xl font-bold text-gray-900' }, 'Budget & regnskab'),
+            h('p', { className: 'text-gray-500 mt-1' }, 'Stil spørgsmål til budget, regnskab, timer og fravær, og se analysen af hver måneds saldobalance.')),
+        h('button', { className: 'act-btn primary shrink-0', onClick: openData }, '+ Nye data')));
 
+    // Hvilke data AI arbejder på lige nu
+    const pb = pbix.active;
+    const src = [
+        budget ? `Budget: ${budget.filename || 'indlæst'} (${formatDate(budget.uploaded_at)})` : 'Intet budget',
+        balances.length ? `Saldobalance: ${monthLabel(String(balances[0].period_end).slice(0, 7))}` : 'Ingen saldobalance',
+        pb ? `Power BI: opdateret ${fmtDT(pb.refreshed_at)}, ${pb.tables.length} tabeller` : 'Ingen Power BI-data',
+        datasets.length ? `${datasets.length} dataudtræk` : null].filter(Boolean);
+    container.appendChild(h('div', { className: 'flex flex-wrap gap-2 mb-4' }, ...src.map(t => h('span', { className: 'fin-src' }, t))));
+
+    const allData = [...datasets, ...(pb?.tables || [])];
+    container.appendChild(budget || allData.length ? financeAskCard(budget, allData)
+        : h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-5 text-sm text-gray-500' }, 'Ingen data endnu. Klik "+ Nye data" og indlæs budget, saldobalance eller Power BI-filen.'));
+
+    const list = h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 mt-4' },
+        h('div', { className: 'px-5 py-3 border-b border-gray-100 font-semibold text-gray-900' }, 'Analyse af saldobalancer'));
+    if (!balances.length) list.appendChild(h('div', { className: 'px-5 py-6 text-sm text-gray-400' }, 'Ingen saldobalancer endnu.'));
+    for (const b of balances) list.appendChild(h('a', { href: `#/finance/${b.id}`, className: 'flex items-center gap-3 px-5 py-3 border-b border-gray-100 last:border-0 hover:bg-gray-50' },
+        h('b', { className: 'text-gray-900' }, cap(monthLabel(String(b.period_end).slice(0, 7)))),
+        h('span', { className: 'text-sm text-gray-500' }, `${b.filename || ''} · ${b.lines} konti`),
+        h('span', { className: `ml-auto text-xs font-semibold ${b.analyzed_at ? 'text-green-700' : 'text-gray-400'}` }, b.analyzed_at ? 'Analyseret' : 'Ikke analyseret'), h('span', { className: 'text-gray-300' }, '→')));
+    container.appendChild(list);
+    if (_finReopenData) { _finReopenData = false; openData(); }
+}
+
+// Popup "Nye data": budget, saldobalance, Power BI-fil og dataudtræk
+const finReload = () => { _finReopenData = true; router(); };
+function financeDataPanel(budget, datasets, pbix) {
+    const panel = h('div');
     const status = h('div', { className: 'text-sm mt-2' });
     const upload = (accept, label, onFile) => {
         const inp = h('input', { type: 'file', accept, style: 'display:none' });
@@ -934,10 +966,9 @@ async function renderFinance(container) {
         });
         return h('label', { className: 'act-btn primary cursor-pointer' }, label, inp);
     };
-
     const monthIn = h('input', { type: 'month', className: 'border border-gray-300 rounded-lg px-2 py-1 text-sm', title: 'Kun nødvendigt, hvis måneden ikke står i filen' });
-    container.appendChild(h('div', { className: 'grid grid-cols-1 md:grid-cols-2 gap-4 mb-6' },
-        h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-5' },
+    panel.appendChild(h('div', { className: 'grid grid-cols-1 md:grid-cols-2 gap-4' },
+        h('div', { className: 'rounded-xl border border-gray-200 p-5' },
             h('div', { className: 'font-semibold text-gray-900 mb-1' }, 'Budget'),
             budget ? h('div', { className: 'text-sm text-gray-600 mb-3' },
                 `${budget.filename || 'Budget'} · ${budget.accounts} konti · ${monthLabel(budget.first_month)} til ${monthLabel(budget.last_month)} · indlæst ${formatDate(budget.uploaded_at)}`)
@@ -945,31 +976,21 @@ async function renderFinance(container) {
             upload('.xlsx,.xlsm', budget ? 'Indlæs ny version' : 'Indlæs budget (Excel)', async f => {
                 const r = await api.uploadFinanceBudget({ filename: f.name, data: await fileToBase64(f) });
                 status.className = 'text-sm mt-2 text-green-700'; status.textContent = `Budget indlæst: ${r.accounts} konti.`;
-                setTimeout(router, 800);
+                setTimeout(finReload, 800);
             })),
-        h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-5' },
+        h('div', { className: 'rounded-xl border border-gray-200 p-5' },
             h('div', { className: 'font-semibold text-gray-900 mb-1' }, 'Saldobalance'),
             h('div', { className: 'text-sm text-gray-500 mb-3' }, 'PDF fra e-conomic (Rapporter › Regnskab › Saldobalance for én måned), eller Excel/CSV med Nr., Navn, Perioden og År til dato. Indlæses samme måned igen, erstattes den gamle.'),
             h('div', { className: 'flex items-center gap-3 flex-wrap' },
                 upload('.pdf,.xlsx,.csv', 'Indlæs saldobalance', async f => {
                     const r = await api.uploadFinanceBalance({ filename: f.name, data: await fileToBase64(f), month: monthIn.value || null });
-                    location.hash = `#/finance/${r.id}`;
+                    closeModal(); location.hash = `#/finance/${r.id}`;
                 }),
                 h('label', { className: 'text-xs text-gray-500 flex items-center gap-2' }, 'Måned (valgfri)', monthIn)))));
-    container.appendChild(status);
-    container.appendChild(financePbixCard(pbix.active));
-    container.appendChild(financeDatasetsCard(datasets, upload, status));
-    const allData = [...datasets, ...(pbix.active?.tables || [])];
-    if (budget || allData.length) container.appendChild(financeAskCard(budget, allData));
-
-    const list = h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 mt-4' },
-        h('div', { className: 'px-5 py-3 border-b border-gray-100 font-semibold text-gray-900' }, 'Indlæste måneder'));
-    if (!balances.length) list.appendChild(h('div', { className: 'px-5 py-6 text-sm text-gray-400' }, 'Ingen saldobalancer endnu.'));
-    for (const b of balances) list.appendChild(h('a', { href: `#/finance/${b.id}`, className: 'flex items-center gap-3 px-5 py-3 border-b border-gray-100 last:border-0 hover:bg-gray-50' },
-        h('b', { className: 'text-gray-900' }, cap(monthLabel(String(b.period_end).slice(0, 7)))),
-        h('span', { className: 'text-sm text-gray-500' }, `${b.filename || ''} · ${b.lines} konti`),
-        h('span', { className: `ml-auto text-xs font-semibold ${b.analyzed_at ? 'text-green-700' : 'text-gray-400'}` }, b.analyzed_at ? 'Analyseret' : 'Ikke analyseret'), h('span', { className: 'text-gray-300' }, '→')));
-    container.appendChild(list);
+    panel.appendChild(status);
+    panel.appendChild(financePbixCard(pbix.active));
+    panel.appendChild(financeDatasetsCard(datasets, upload, status));
+    return panel;
 }
 
 // Power BI-fil (.pbix): uploades i bidder, kontrolleres og vises som kladde, før den erstatter de aktive data
@@ -981,7 +1002,7 @@ function pbixTables(tables) {
         t.dropped?.length ? h('span', { className: 'text-xs text-gray-400 col-span-2' }, `Ikke importeret: ${t.dropped.join(', ')}`) : null)));
 }
 function financePbixCard(active) {
-    const card = h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-5 mt-4' });
+    const card = h('div', { className: 'rounded-xl border border-gray-200 p-5 mt-4' });
     const body = h('div');
     const msg = h('div', { className: 'text-sm mt-2' });
     const inp = h('input', { type: 'file', accept: '.pbix', style: 'display:none' });
@@ -1004,7 +1025,7 @@ function financePbixCard(active) {
         activate.addEventListener('click', async () => {
             if (st.older && !confirmOlder.checked) { msg.className = 'text-sm mt-2 text-red-600'; msg.textContent = 'Sæt flueben, hvis du vil erstatte nyere data med ældre.'; return; }
             activate.disabled = cancel.disabled = true;
-            try { await api.activatePbix(st.id, confirmOlder.checked); router(); }
+            try { await api.activatePbix(st.id, confirmOlder.checked); finReload(); }
             catch (e) { msg.className = 'text-sm mt-2 text-red-600'; msg.textContent = e.message; activate.disabled = cancel.disabled = false; }
         });
         cancel.addEventListener('click', async () => { await api.deletePbix(st.id); msg.textContent = ''; showActive(); pick.style.display = ''; });
@@ -1047,7 +1068,7 @@ function financePbixCard(active) {
 // Dataudtræk (Power BI, TimeLog, bank …) som AI kan regne på, fx timer, fakturerbarhed og fravær pr. medarbejder
 function financeDatasetsCard(datasets, upload, status) {
     const anon = h('input', { type: 'checkbox' });
-    const card = h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-5 mt-4' },
+    const card = h('div', { className: 'rounded-xl border border-gray-200 p-5 mt-4' },
         h('div', { className: 'font-semibold text-gray-900 mb-1' }, 'Dataudtræk til AI'),
         h('p', { className: 'text-sm text-gray-500 mb-3' }, 'Excel eller CSV, fx eksporteret fra Power BI (højreklik på en tabel › Eksportér data) eller TimeLog: timer, fakturerbarhed, normtid, fravær, sygdom og bankposteringer. Hver fane bliver en tabel, som AI regner på, når du stiller spørgsmål. Samme fil indlæst igen erstatter den gamle. Maks. ca. 3 MB pr. fil.'),
         h('div', { className: 'flex items-center gap-4 flex-wrap mb-3' },
@@ -1056,7 +1077,7 @@ function financeDatasetsCard(datasets, upload, status) {
                 const r = await api.uploadFinanceDataset({ filename: f.name, data: await fileToBase64(f), anonymize: anon.checked });
                 status.className = 'text-sm mt-2 text-green-700';
                 status.textContent = `Indlæst: ${r.map(t => `${t.name} (${t.row_count.toLocaleString('da-DK')} rækker)`).join(', ')}.`;
-                setTimeout(router, 1200);
+                setTimeout(finReload, 1200);
             }),
             h('label', { className: 'text-xs text-gray-500 flex items-center gap-2' }, anon, 'Skjul navne i fravær/sygdom (erstattes af Person 1, 2 …)')));
     if (!datasets.length) card.appendChild(h('div', { className: 'text-sm text-gray-400' }, 'Ingen dataudtræk endnu.'));
@@ -1066,7 +1087,7 @@ function financeDatasetsCard(datasets, upload, status) {
             h('div', { className: 'text-xs text-gray-400 truncate', title: d.columns.join(', ') }, d.columns.join(', ')),
             d.anonymized?.length ? h('div', { className: 'text-xs text-amber-700' }, `Navne skjult i: ${d.anonymized.join(', ')}`) : null),
         h('button', { className: 'text-xs text-red-600 hover:underline', onClick: async () => {
-            if (!confirm(`Slet ${d.name}?`)) return; await api.deleteFinanceDataset(d.id); router(); } }, 'Slet')));
+            if (!confirm(`Slet ${d.name}?`)) return; await api.deleteFinanceDataset(d.id); finReload(); } }, 'Slet')));
     return card;
 }
 
@@ -1074,7 +1095,7 @@ function financeDatasetsCard(datasets, upload, status) {
 let _financeChat = [];
 function financeAskCard(budget, datasets = []) {
     const ready = !!(budget?.has_digest || datasets.length);
-    const card = h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-5 mt-4' });
+    const card = h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-5' });
     const chat = h('div', { className: 'fin-chat' });
     const draw = () => {
         chat.innerHTML = '';
@@ -1107,7 +1128,7 @@ function financeAskCard(budget, datasets = []) {
             _financeChat.length ? h('button', { className: 'text-xs text-gray-500 hover:underline', onClick: () => { _financeChat = []; draw(); } }, 'Ny samtale') : null),
         h('p', { className: 'text-sm text-gray-500 mb-3' }, ready
             ? `AI kender ${[budget?.has_digest ? 'hele budgetfilen og den seneste saldobalance' : null, datasets.length ? `${datasets.length} datatabeller` : null].filter(Boolean).join(' og ')} og regner med kode. Svarene viser beregning og forudsætninger, så du kan tjekke dem.`
-            : 'Indlæs budgetfilen igen (knappen ovenfor), så AI kan læse alle fanerne. Den nuværende blev indlæst, før denne funktion fandtes.'),
+            : 'Indlæs budgetfilen igen (+ Nye data), så AI kan læse alle fanerne. Den nuværende blev indlæst, før denne funktion fandtes.'),
         chat,
         h('div', { className: 'flex flex-wrap gap-2 mb-2' }, ...examples.map(x => h('button', { className: 'fin-chip', ...(ready ? {} : { disabled: '' }), onClick: () => ask(x) }, x))),
         input, h('div', { className: 'flex justify-between items-center mt-2' }, h('span', { className: 'text-xs text-gray-400' }, '⌘/Ctrl + Enter sender'), btn));

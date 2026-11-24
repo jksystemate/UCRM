@@ -1,4 +1,4 @@
-import { api } from './api.js?v=51';
+import { api } from './api.js?v=52';
 
 // ─── Constants ───
 const CATEGORY_LABELS = { opkald:'Opkald', tilbud:'Tilbud', moede:'Møde', opfølgning:'Opfølgning', demo:'Demo', kontrakt:'Kontrakt', implementering:'Implementering', support:'Support', faktura:'Fakturering', budget:'Budget', generelt:'Generelt' };
@@ -18,6 +18,24 @@ const TENDER_STATUS_COLORS = { draft:'bg-gray-100 text-gray-600', in_progress:'b
 function routeBadge(t) {
     if (t.purchase_route !== 'faellesskab') return null;
     return h('span', { className: 'route-pill', title: 'Kunden køber via indkøbsfællesskab' }, `via ${t.via_group_name || 'fællesskab'}`);
+}
+// Salgsform og faser på et tilbud (samme lister som TENDER_PHASES i api/index.py)
+const SALES_TYPE_LABELS = { direkte: 'Direkte salg', udbud: 'Udbud' };
+const TENDER_PHASES = {
+    direkte: [['indledende', 'Indledende møder'], ['demo', 'Demo'], ['afklaring', 'Spørgsmål / kravspec'],
+              ['tilbud', 'Tilbud med pris og tidsplan'], ['forhandling', 'Forhandling'], ['kontrakt', 'Kontrakt']],
+    udbud: [['markedsdialog', 'Markedsdialog'], ['offentliggjort', 'Udbud offentliggjort'], ['kravbesvarelse', 'Kravbesvarelse'],
+            ['afleveret', 'Afleveret'], ['evaluering', 'Evaluering / afventer svar'], ['standstill', 'Kontrakt (standstill)']],
+};
+const TENDER_CLOSED = [['vundet', 'Vundet'], ['tabt', 'Tabt'], ['droppet', 'Droppet']];
+const TENDER_PHASE_LABELS = Object.fromEntries([...TENDER_PHASES.direkte, ...TENDER_PHASES.udbud, ...TENDER_CLOSED]);
+const TENDER_PHASE_COLORS = { vundet: 'bg-green-100 text-green-700', tabt: 'bg-red-100 text-red-700', droppet: 'bg-orange-100 text-orange-700' };
+// Mærke med salgsform og fase. Gamle tilbud uden fase viser status som før.
+function tenderBadge(t) {
+    if (!t.phase) return h('span', { className: `inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${TENDER_STATUS_COLORS[t.status] || ''}` }, TENDER_STATUS_LABELS[t.status] || t.status);
+    const closed = !!TENDER_PHASE_COLORS[t.phase];
+    return h('span', { className: `inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${TENDER_PHASE_COLORS[t.phase] || (t.sales_type === 'udbud' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700')}` },
+        closed ? TENDER_PHASE_LABELS[t.phase] : `${SALES_TYPE_LABELS[t.sales_type] || ''} · ${TENDER_PHASE_LABELS[t.phase] || t.phase}`);
 }
 const SECTION_STATUS_LABELS = { not_started:'Ikke startet', in_progress:'I gang', in_review:'Til review', approved:'Godkendt' };
 const SECTION_STATUS_COLORS = { not_started:'bg-gray-100 text-gray-600', in_progress:'bg-blue-100 text-blue-700', in_review:'bg-yellow-100 text-yellow-700', approved:'bg-green-100 text-green-700' };
@@ -705,7 +723,7 @@ async function renderDashboard(container) {
                 h('div', { className: 'flex items-start justify-between mb-2' },
                     h('div', { className: 'font-semibold text-gray-900 truncate flex-1' }, t.company_name || t.title),
                     routeBadge(t),
-                    h('span', { className: `inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${TENDER_STATUS_COLORS[t.status] || ''}` }, TENDER_STATUS_LABELS[t.status] || t.status)
+                    tenderBadge(t)
                 ),
                 t.company_name ? h('div', { className: 'text-xs text-gray-500 truncate mb-2' }, t.title) : null,
                 h('div', { className: 'flex items-center gap-3 text-xs' },
@@ -1968,7 +1986,7 @@ async function renderCompanyDetail(container, id) {
                 h('div', { className: 'flex-1' },
                     h('div', { className: 'font-medium text-sm text-gray-900' }, t.title),
                     h('div', { className: 'flex gap-2 mt-1 flex-wrap' },
-                        h('span', { className: `text-xs px-2 py-0.5 rounded font-medium ${statusColors[t.status] || 'bg-gray-100 text-gray-600'}` }, TENDER_STATUS_LABELS[t.status] || t.status),
+                        tenderBadge(t),
                         routeBadge(t),
                         t.deadline ? h('span', { className: 'text-xs text-gray-400' }, `Deadline: ${formatDate(t.deadline)}`) : null,
                         t.responsible_name ? h('span', { className: 'text-xs text-gray-500' }, t.responsible_name) : null,
@@ -2485,14 +2503,13 @@ async function renderTenders(container) {
     ));
 
     // Summary stats
-    const byStatus = { draft:0, in_progress:0, submitted:0, won:0, lost:0 };
-    for (const t of tenders) byStatus[t.status] = (byStatus[t.status] || 0) + 1;
+    const active = tenders.filter(t => !['won', 'lost', 'dropped'].includes(t.status));
     const statData = [
-        { label:'Kladde', value: byStatus.draft, color:'text-gray-600' },
-        { label:'I gang', value: byStatus.in_progress, color:'text-blue-600' },
-        { label:'Indsendt', value: byStatus.submitted, color:'text-yellow-600' },
-        { label:'Vundet', value: byStatus.won, color:'text-green-600' },
-        { label:'Tabt', value: byStatus.lost, color:'text-red-600' },
+        { label:'Udbud i gang', value: active.filter(t => t.sales_type === 'udbud').length, color:'text-purple-600' },
+        { label:'Direkte salg i gang', value: active.filter(t => t.sales_type === 'direkte').length, color:'text-blue-600' },
+        { label:'Uden salgsform', value: active.filter(t => !t.sales_type).length, color:'text-gray-600' },
+        { label:'Vundet', value: tenders.filter(t => t.status === 'won').length, color:'text-green-600' },
+        { label:'Tabt', value: tenders.filter(t => t.status === 'lost').length, color:'text-red-600' },
     ];
     const statCards = h('div', { className: 'grid grid-cols-2 md:grid-cols-5 gap-4 mb-6' });
     for (const s of statData) {
@@ -2546,7 +2563,7 @@ function renderTenderList(container, tenders, statusFilter) {
                     : h('div', { className: 'font-semibold text-gray-900' }, t.title),
                 t.company_name ? h('div', { className: 'text-sm text-gray-500 truncate' }, t.title) : null,
                 h('div', { className: 'flex flex-wrap gap-2 mt-1' },
-                    h('span', { className: `inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${TENDER_STATUS_COLORS[t.status] || ''}` }, TENDER_STATUS_LABELS[t.status] || t.status),
+                    tenderBadge(t),
                     routeBadge(t),
                     t.responsible_name ? h('span', { className: 'text-xs text-gray-500' }, t.responsible_name) : null,
                     t.estimated_value ? h('span', { className: 'text-xs text-gray-400' }, t.estimated_value) : null
@@ -2569,10 +2586,11 @@ function renderTenderList(container, tenders, statusFilter) {
 
 async function renderTenderDetail(container, id) {
     container.innerHTML = '<div class="text-gray-400">Indlæser...</div>';
-    const [data, tenderNotes, tenderHistory] = await Promise.all([
+    const [data, tenderNotes, tenderHistory, phaseLog] = await Promise.all([
         api.getTenderFull(id),
         api.getTenderNotes(id),
-        api.getTenderHistory(id)
+        api.getTenderHistory(id),
+        api.getTenderPhases(id).catch(() => [])
     ]);
     const { tender, sections, users } = data;
     container.innerHTML = '';
@@ -2589,7 +2607,7 @@ async function renderTenderDetail(container, id) {
                     : h('h1', { className: 'text-2xl font-bold text-gray-900' }, tender.title),
                 tender.company_name ? h('div', { className: 'text-base text-gray-500 mt-1' }, tender.title) : null,
                 h('div', { className: 'flex flex-wrap gap-2 mt-2' },
-                    h('span', { className: `inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${TENDER_STATUS_COLORS[tender.status] || ''}` }, TENDER_STATUS_LABELS[tender.status] || tender.status),
+                    tenderBadge(tender),
                     tender.purchase_route === 'faellesskab'
                         ? h('a', { href: `#/companies/${tender.via_group_id}`, className: 'route-pill' }, `Køber via ${tender.via_group_name || 'fællesskab'}`)
                         : h('span', { className: 'text-sm text-gray-500' }, 'Kunden køber selv'),
@@ -2631,6 +2649,7 @@ async function renderTenderDetail(container, id) {
             )
         )
     ));
+    container.appendChild(tenderPhaseCard(tender, phaseLog, users));
 
     // Info cards
     const totalSections = sections.length;
@@ -3070,10 +3089,65 @@ async function showSectionNotes(section, users) {
     showModal(`${section.title}`, container);
 }
 
+// Forløbet på et tilbud: faserne for salgsformen, hvornår hver blev nået, og hvor længe det har stået i den nuværende
+function tenderPhaseCard(tender, log, users) {
+    const card = h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-4 mb-6' });
+    if (!tender.sales_type) {
+        card.append(h('div', { className: 'flex items-center justify-between gap-3' },
+            h('div', { className: 'text-sm text-gray-600' }, 'Vælg om det er udbud eller direkte salg, så kan du følge faserne og se, hvornår tilbuddet skifter fase.'),
+            h('button', { className: 'act-btn primary', onClick: () => showTenderForm(users, tender) }, 'Vælg salgsform')));
+        return card;
+    }
+    const reached = {};
+    for (const e of log) reached[e.phase] = e;  // seneste gang hver fase blev nået
+    const days = tender.phase_changed_at ? Math.floor((Date.now() - new Date(tender.phase_changed_at)) / 86400000) : null;
+    const steps = [...TENDER_PHASES[tender.sales_type], ...(TENDER_PHASE_COLORS[tender.phase] ? [[tender.phase, TENDER_PHASE_LABELS[tender.phase]]] : [])];
+    const curIdx = steps.findIndex(([k]) => k === tender.phase);
+    const sel = h('select', { className: 'border border-gray-300 rounded-lg px-2 py-1 text-sm' },
+        ...[...TENDER_PHASES[tender.sales_type], ...TENDER_CLOSED].map(([k, l]) => h('option', { value: k, ...(k === tender.phase ? { selected: '' } : {}) }, l)));
+    sel.addEventListener('change', async () => {
+        try { await api.updateTender(tender.id, { phase: sel.value }); router(); } catch (err) { alert(err.message); }
+    });
+    card.append(
+        h('div', { className: 'flex items-center justify-between gap-3 mb-3 flex-wrap' },
+            h('div', {}, h('b', { className: 'text-gray-900' }, `${SALES_TYPE_LABELS[tender.sales_type]}: forløb`),
+                days != null ? h('span', { className: 'text-sm text-gray-500 ml-2' }, `${days} dag${days === 1 ? '' : 'e'} i ${(TENDER_PHASE_LABELS[tender.phase] || '').toLowerCase()}`) : null),
+            h('label', { className: 'flex items-center gap-2 text-sm text-gray-600' }, 'Skift fase', sel)),
+        h('div', { className: 'phase-steps' }, ...steps.map(([k, l], i) => h('div', { className: `phase-step ${i < curIdx ? 'done' : i === curIdx ? 'cur' : ''} ${TENDER_PHASE_COLORS[k] ? 'closed-' + k : ''}` },
+            h('div', { className: 'phase-dot' }), h('div', { className: 'phase-name' }, l),
+            reached[k] ? h('div', { className: 'phase-date' }, formatDate(reached[k].changed_at)) : null))),
+        log.length ? h('details', { className: 'mt-3 text-sm' }, h('summary', { className: 'text-gray-500 cursor-pointer' }, `Alle faseskift (${log.length})`),
+            h('div', { className: 'mt-2 space-y-1' }, ...log.slice().reverse().map(e => h('div', { className: 'text-gray-600' },
+                `${formatDate(e.changed_at)} · ${TENDER_PHASE_LABELS[e.phase] || e.phase}`,
+                h('span', { className: 'text-gray-400' }, `${e.changed_by ? ' · ' + e.changed_by : ''}${e.source === 'indrapportering' ? ' (indrapportering)' : e.source === 'oprettet' ? ' (oprettet)' : ''}`))))) : null);
+    return card;
+}
+
 async function showTenderForm(users, existing = null, prefillCompanyId = null) {
     const isEdit = !!existing;
-    let companies = [], templates = [], groups = [];
-    try { [companies, templates, groups] = await Promise.all([api.getCompanies(), api.getTenderTemplates(), api.getPurchasingGroups()]); } catch(e) {}
+    let companies = [], groups = [];
+    try { [companies, groups] = await Promise.all([api.getCompanies(), api.getPurchasingGroups()]); } catch(e) {}
+
+    // Salgsform styrer, hvilke faser man kan vælge. Hvert faseskift gemmes med dato.
+    const phaseSel = h('select', { name: 'phase', className: 'w-full border border-gray-300 rounded-lg px-3 py-2' });
+    const portalField = h('div', {},
+        h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, 'Link til udbudsportal'),
+        h('input', { type: 'url', name: 'portal_link', value: existing?.portal_link || '', placeholder: 'fx Mercell, EU-Supply eller Ethics', className: 'w-full border border-gray-300 rounded-lg px-3 py-2' }));
+    const drawPhases = (type) => {
+        const cur = phaseSel.value || existing?.phase || '';
+        phaseSel.innerHTML = '';
+        if (!type) { phaseSel.append(h('option', { value: '' }, 'Vælg salgsform først')); phaseSel.disabled = true; return; }
+        phaseSel.disabled = false;
+        const list = [...TENDER_PHASES[type], ...(isEdit ? TENDER_CLOSED : [])];
+        const keep = list.some(([k]) => k === cur) ? cur : list[0][0];
+        phaseSel.append(...list.map(([k, l]) => h('option', { value: k, ...(k === keep ? { selected: '' } : {}) }, l)));
+        portalField.style.display = type === 'udbud' ? '' : 'none';
+    };
+    const typeField = h('div', {},
+        h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, 'Salgsform *'),
+        h('div', { className: 'flex gap-4' }, ...Object.entries(SALES_TYPE_LABELS).map(([k, l]) => h('label', { className: 'flex items-center gap-2 text-sm' },
+            h('input', { type: 'radio', name: 'sales_type', value: k, ...(existing?.sales_type === k ? { checked: '' } : {}), onChange: () => drawPhases(k) }), l))));
+    drawPhases(existing?.sales_type || '');
 
     // Købsvej: kunden selv eller via et indkøbsfællesskab. Kundens egne fællesskaber står først.
     const routeField = h('div', { className: 'route-field' });
@@ -3105,9 +3179,9 @@ async function showTenderForm(users, existing = null, prefillCompanyId = null) {
         const data = {
             company_id: parseInt(fd.get('company_id')),
             title: fd.get('title'),
-            template_id: fd.get('template_id') ? parseInt(fd.get('template_id')) : null,
+            sales_type: fd.get('sales_type') || null,
+            phase: fd.get('phase') || null,
             description: fd.get('description') || null,
-            status: fd.get('status') || 'draft',
             deadline: fd.get('deadline') || null,
             responsible_id: fd.get('responsible_id') ? parseInt(fd.get('responsible_id')) : null,
             estimated_value: fd.get('estimated_value') || null,
@@ -3116,6 +3190,8 @@ async function showTenderForm(users, existing = null, prefillCompanyId = null) {
             purchase_route: fd.get('purchase_route') || 'selv',
             via_group_id: fd.get('purchase_route') === 'faellesskab' && fd.get('via_group_id') ? parseInt(fd.get('via_group_id')) : null,
         };
+        if (!data.sales_type) { alert('Vælg om det er udbud eller direkte salg.'); return; }
+        if (data.sales_type !== 'udbud') data.portal_link = existing?.portal_link || null;
         const memberOf = companies.find(c => c.id === data.company_id)?.memberships || [];
         if (memberOf.length && !fd.get('purchase_route')) { alert('Kunden er medlem af et indkøbsfællesskab. Vælg om de køber selv eller via fællesskabet.'); return; }
         if (data.purchase_route === 'faellesskab' && !data.via_group_id) { alert('Vælg hvilket fællesskab kunden køber via.'); return; }
@@ -3134,21 +3210,11 @@ async function showTenderForm(users, existing = null, prefillCompanyId = null) {
             )
         ),
         routeField,
-        !isEdit ? h('div', {},
-            h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, 'Skabelon'),
-            h('select', { name:'template_id', className:'w-full border border-gray-300 rounded-lg px-3 py-2' },
-                h('option', { value:'' }, 'Ingen skabelon'),
-                ...templates.map(t => h('option', { value: String(t.id) }, `${t.name} (${t.section_count} sektioner)`))
-            )
-        ) : null,
+        typeField,
         h('div', { className: 'grid grid-cols-2 gap-3' },
             h('div', {},
-                h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, 'Status'),
-                h('select', { name:'status', className:'w-full border border-gray-300 rounded-lg px-3 py-2' },
-                    ...Object.entries(TENDER_STATUS_LABELS).map(([k, v]) =>
-                        h('option', Object.assign({ value: k }, (existing?.status || 'draft') === k ? { selected:'' } : {}), v))
-                )
-            ),
+                h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, 'Fase'),
+                phaseSel),
             formField('Deadline', 'deadline', existing?.deadline || '', 'date')
         ),
         h('div', {},
@@ -3160,9 +3226,7 @@ async function showTenderForm(users, existing = null, prefillCompanyId = null) {
         ),
         h('div', { className: 'grid grid-cols-2 gap-3' },
             formField('Estimeret værdi', 'estimated_value', existing?.estimated_value || ''),
-            h('div', {},
-                h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, 'Link til udbudsportal'),
-                h('input', { type: 'url', name: 'portal_link', value: existing?.portal_link || '', placeholder: 'fx Mercell, EU-Supply eller Ethics', className: 'w-full border border-gray-300 rounded-lg px-3 py-2' }))
+            portalField
         ),
         h('div', {},
             h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, 'Beskrivelse'),
@@ -5564,11 +5628,11 @@ async function renderReportRound(container, id) {
             const row = (k, v) => v || v === 0 ? rows.push(h('div', { className: 'ans-row' }, h('span', {}, k), h('div', {}, String(v)))) : null;
             if (a.later) row('Status', 'Svarer senere. Kommer med i næste indrapportering.');
             else if (kind === 'matrix') {
-                const opt = Object.fromEntries(it.context?.options || []);
                 for (const rr of it.context?.rows || []) {
+                    const opt = Object.fromEntries(rr.options || it.context?.options || []);
                     const v = (a.rows || {})[rr.company_id];
                     const note = (a.notes || {})[rr.company_id];
-                    row(rr.name, v ? `${opt[v] || v}${note ? ': ' + note : ''}${rr.current && rr.current !== v && it.context?.target === 'sales_phase' ? ` (før: ${opt[rr.current] || rr.current})` : ''}` : '(ikke besvaret)');
+                    row(rr.name, v ? `${opt[v] || v}${note ? ': ' + note : ''}${rr.current && rr.current !== v && ['sales_phase', 'tender_phase'].includes(it.context?.target) ? ` (før: ${opt[rr.current] || rr.current})` : ''}` : '(ikke besvaret)');
                 }
             } else if (kind === 'customer') {
                 if (a.not_relevant) row('Status', 'Ikke længere i proces');
@@ -5697,7 +5761,7 @@ function renderReportDraft(container, r) {
                 } }, 'Fjern emne')),
             titleIn,
             it.kind === 'topic' ? factsIn
-                : it.kind === 'matrix' ? h('div', { className: 'text-sm text-gray-500 mt-1' }, `Klik-liste til ${(c.rows || []).length} kunder: ${(c.options || []).map(o => o[1]).join(' · ')}`)
+                : it.kind === 'matrix' ? h('div', { className: 'text-sm text-gray-500 mt-1' }, c.target === 'tender_phase' ? `Klik-liste til ${(c.rows || []).length} tilbud: fasen vælges pr. tilbud` : `Klik-liste til ${(c.rows || []).length} kunder: ${(c.options || []).map(o => o[1]).join(' · ')}`)
                 : h('div', { className: 'text-sm text-gray-500 mt-2' }, 'Endnu ikke formuleret af AI. Bruger de faste spørgsmål.'),
             c.why ? h('div', { className: 'text-sm text-gray-500 italic mt-1' }, c.why) : null,
             it.kind === 'topic' ? h('div', { className: 'mt-3' }, qList) : null,

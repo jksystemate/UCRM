@@ -88,6 +88,29 @@ SALES_TYPES = [["direkte", "Direkte salg"], ["udbud", "Udbud"], ["ved_ikke", "Ve
 SALES_PHASES = [["indledende", "Indledende møder"], ["demo", "Demo"], ["afklaring", "Spørgsmål / kravspec / kravbesvarelse"],
                 ["tilbud", "Tilbud"], ["forhandling", "Forhandling"], ["kontrakt", "Kontrakt"],
                 ["vundet", "Vundet"], ["tabt", "Tabt"], ["ikke_i_proces", "Ikke i proces"], ["ved_ikke", "Ved ikke"]]
+# Faser på et tilbud afhænger af salgsformen. Hvert skift gemmes i tender_phase_log.
+TENDER_PHASES = {
+    "direkte": [["indledende", "Indledende møder"], ["demo", "Demo"], ["afklaring", "Spørgsmål / kravspec"],
+                ["tilbud", "Tilbud med pris og tidsplan"], ["forhandling", "Forhandling"], ["kontrakt", "Kontrakt"]],
+    "udbud": [["markedsdialog", "Markedsdialog"], ["offentliggjort", "Udbud offentliggjort"], ["kravbesvarelse", "Kravbesvarelse"],
+              ["afleveret", "Afleveret"], ["evaluering", "Evaluering / afventer svar"], ["standstill", "Kontrakt (standstill)"]],
+}
+TENDER_CLOSED = [["vundet", "Vundet"], ["tabt", "Tabt"], ["droppet", "Droppet"]]
+TENDER_PHASE_LABELS = {k: v for lst in [*TENDER_PHASES.values(), TENDER_CLOSED] for k, v in lst}
+# Den gamle status holdes i takt med fasen, så oversigter og filtre (aktiv / vundet / tabt) virker som før
+PHASE_TO_TENDER_STATUS = {"vundet": "won", "tabt": "lost", "droppet": "dropped",
+                          "tilbud": "submitted", "forhandling": "submitted", "kontrakt": "submitted",
+                          "afleveret": "submitted", "evaluering": "submitted", "standstill": "submitted"}
+TENDER_STATUS_TO_PHASE = {"won": "vundet", "lost": "tabt", "dropped": "droppet"}
+# Tilbuddets fase → kundens fase (kundematrix og salgsstadie)
+TENDER_TO_COMPANY_PHASE = {"markedsdialog": "indledende", "offentliggjort": "afklaring", "kravbesvarelse": "afklaring",
+                           "afleveret": "tilbud", "evaluering": "tilbud", "standstill": "kontrakt", "droppet": "ikke_i_proces"}
+
+
+def tender_phase_ok(sales_type, phase):
+    return phase in dict(TENDER_CLOSED) or phase in dict(TENDER_PHASES.get(sales_type) or [])
+
+
 # Fase → det grove salgsstadie, som kundematrixen bruger
 PHASE_TO_STAGE = {"indledende": "tidlig_fase", "demo": "aktiv_dialog", "afklaring": "aktiv_dialog",
                   "tilbud": "fremskreden", "forhandling": "fremskreden", "kontrakt": "fremskreden"}
@@ -660,6 +683,20 @@ def init_db():
                 PRIMARY KEY (company_id, group_id)
             )""",
             "ALTER TABLE tenders ADD COLUMN IF NOT EXISTS purchase_route TEXT DEFAULT 'selv'",
+            "ALTER TABLE tenders ADD COLUMN IF NOT EXISTS sales_type TEXT",
+            "ALTER TABLE tenders ADD COLUMN IF NOT EXISTS phase TEXT",
+            "ALTER TABLE tenders ADD COLUMN IF NOT EXISTS phase_changed_at TIMESTAMP",
+            """CREATE TABLE IF NOT EXISTS tender_phase_log (
+                id SERIAL PRIMARY KEY,
+                tender_id INTEGER NOT NULL REFERENCES tenders(id) ON DELETE CASCADE,
+                sales_type TEXT,
+                phase TEXT NOT NULL,
+                changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                changed_by TEXT,
+                source TEXT
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_tender_phase_log ON tender_phase_log(tender_id, changed_at)",
+            "UPDATE tenders SET phase = CASE status WHEN 'won' THEN 'vundet' WHEN 'lost' THEN 'tabt' ELSE 'droppet' END WHERE phase IS NULL AND status IN ('won','lost','dropped')",
             # Salgsform og fase efter CEO'ens salgsproces (opdateres fx fra indrapporteringens hurtige lister)
             "ALTER TABLE companies ADD COLUMN IF NOT EXISTS sales_type TEXT",
             "ALTER TABLE goals ADD COLUMN IF NOT EXISTS breakdown_proposal JSONB",
@@ -1593,6 +1630,11 @@ class handler(BaseHTTPRequestHandler):
                 self._json_response([dict(r) for r in db.execute(
                     "SELECT * FROM tender_notes WHERE tender_id = %s ORDER BY created_at DESC", (tid,)).fetchall()])
 
+            elif path.startswith("/api/tenders/") and path.endswith("/phases"):
+                tid = int(path.split("/")[-2])
+                self._json_response([dict(r) for r in db.execute(
+                    "SELECT * FROM tender_phase_log WHERE tender_id = %s ORDER BY changed_at, id", (tid,)).fetchall()])
+
             elif path.startswith("/api/tenders/") and path.endswith("/history"):
                 tid = int(path.split("/")[-2])
                 self._json_response([dict(r) for r in db.execute(
@@ -1941,6 +1983,9 @@ class handler(BaseHTTPRequestHandler):
                 self._json_response({"tender": dict(tender), "sections": sections,
                                      "users": users, "companies": companies})
 
+            elif path == "/api/tender-phases":
+                self._json_response({"phases": TENDER_PHASES, "closed": TENDER_CLOSED})
+
             elif path == "/api/tender-templates":
                 templates = [dict(r) for r in db.execute(
                     "SELECT * FROM tender_templates ORDER BY is_default DESC, name").fetchall()]
@@ -2220,6 +2265,9 @@ class handler(BaseHTTPRequestHandler):
                      body.get("portal_link"), body.get("notes"), body.get("purchase_route") or "selv",
                      body.get("via_group_id") if body.get("purchase_route") == "faellesskab" else None))
                 tender_id = cur.fetchone()["id"]
+                if body.get("sales_type") in TENDER_PHASES:
+                    first = body.get("phase") or TENDER_PHASES[body["sales_type"]][0][0]
+                    self._set_tender_phase(db, tender_id, first, self._user_name(db, uid), "oprettet", body["sales_type"])
                 template_id = body.get("template_id")
                 if template_id:
                     tmpl_sections = db.execute(
@@ -2599,6 +2647,15 @@ class handler(BaseHTTPRequestHandler):
                     if k in e:
                         e[k] = v
                 route = e.get("purchase_route") or "selv"
+                # Fase og salgsform skiftes via _set_tender_phase, så skiftet bliver logget
+                new_type, new_phase = body.get("sales_type") or existing["sales_type"], body.get("phase")
+                if body.get("status") in TENDER_STATUS_TO_PHASE and not new_phase:
+                    new_phase = TENDER_STATUS_TO_PHASE[body["status"]]
+                if new_type and new_type != existing["sales_type"] and not new_phase:
+                    new_phase = TENDER_PHASES[new_type][0][0] if new_type in TENDER_PHASES else None
+                if new_phase:
+                    self._set_tender_phase(db, tid, new_phase, self._user_name(db, uid), "manuel", new_type)
+                    e["status"] = db.execute("SELECT status FROM tenders WHERE id = %s", (tid,)).fetchone()["status"]
                 db.execute(
                     """UPDATE tenders SET company_id=%s,title=%s,description=%s,status=%s,
                        deadline=%s,contact_id=%s,responsible_id=%s,estimated_value=%s,portal_link=%s,notes=%s,
@@ -2847,6 +2904,24 @@ class handler(BaseHTTPRequestHandler):
             db.close()
 
     # ─── SystemateCEO: mål, ledermøder og aktioner ───
+    def _set_tender_phase(self, db, tid, phase, who=None, source="manuel", sales_type=None):
+        """Skifter fase på et tilbud: gemmer skiftet med dato, holder status i takt og opdaterer kundens fase."""
+        t = db.execute("SELECT id, company_id, sales_type, phase FROM tenders WHERE id = %s", (tid,)).fetchone()
+        if not t:
+            return False
+        st = sales_type or t["sales_type"]
+        if not phase or not tender_phase_ok(st, phase) or (phase == t["phase"] and st == t["sales_type"]):
+            return False
+        status = PHASE_TO_TENDER_STATUS.get(phase, "in_progress")
+        db.execute("UPDATE tenders SET sales_type = %s, phase = %s, phase_changed_at = CURRENT_TIMESTAMP, status = %s WHERE id = %s",
+                   (st, phase, status, tid))
+        db.execute("INSERT INTO tender_phase_log (tender_id, sales_type, phase, changed_by, source) VALUES (%s,%s,%s,%s,%s)",
+                   (tid, st, phase, who, source))
+        cphase = TENDER_TO_COMPANY_PHASE.get(phase, phase)
+        db.execute("""UPDATE companies SET sales_type = COALESCE(%s, sales_type), sales_phase = %s, sales_phase_updated = CURRENT_DATE,
+                      sales_stage = COALESCE(%s, sales_stage) WHERE id = %s""", (st, cphase, PHASE_TO_STAGE.get(cphase), t["company_id"]))
+        return True
+
     def _user_name(self, db, uid):
         if not uid:
             return None
@@ -3912,7 +3987,8 @@ class handler(BaseHTTPRequestHandler):
             for co in companies:
                 cid = co["id"]
                 tenders = [dict(r) for r in db.execute("""
-                    SELECT t.id, t.title, t.status, t.deadline, t.estimated_value, t.purchase_route, g.name AS via_group
+                    SELECT t.id, t.title, t.status, t.deadline, t.estimated_value, t.purchase_route, g.name AS via_group,
+                           t.sales_type, t.phase, (CURRENT_DATE - t.phase_changed_at::date) AS days_in_phase
                     FROM tenders t LEFT JOIN companies g ON t.via_group_id = g.id
                     WHERE t.company_id = %s AND t.status NOT IN ('won','lost','dropped') ORDER BY t.deadline NULLS LAST""", (cid,)).fetchall()]
                 groups = [r["name"] for r in db.execute(
@@ -3932,6 +4008,8 @@ class handler(BaseHTTPRequestHandler):
                     WHERE ri.company_id = %s AND ri.kind IN ('customer','topic') AND rr.area = %s AND ri.answer IS NOT NULL
                           AND rr.submitted_at IS NOT NULL
                     ORDER BY rr.submitted_at DESC NULLS LAST, ri.id DESC LIMIT 1""", (cid, area)).fetchone()
+                for t in tenders:
+                    t["phase_label"] = TENDER_PHASE_LABELS.get(t.get("phase"))
                 ctx = {"tenders": tenders, "tasks": tasks, "sales_stage": co["sales_stage"], "member_of": groups,
                        "sales_type": co["sales_type"], "sales_phase": co["sales_phase"],
                        "last_contact": last["d"] if last else None,
@@ -3951,16 +4029,32 @@ class handler(BaseHTTPRequestHandler):
                     parts.append("medlem af " + ", ".join(ctx["member_of"]))
                 return " · ".join(parts)
             rows = lambda lst, field: [{"company_id": co["id"], "name": co["name"], "hint": hint(ctx), "current": ctx.get(field)} for co, ctx in lst]
-            unknown_type = [(co, ctx) for co, ctx in customers if not ctx["sales_type"] or ctx["sales_type"] == "ved_ikke"]
+            # Tilbud med salgsform melder fasen på selve tilbuddet. Kunder uden sådan et tilbud melder fasen på kunden.
+            typed = lambda ctx: [t for t in ctx["tenders"] if t.get("sales_type") in TENDER_PHASES]
+            tender_rows = [{"company_id": t["id"], "name": f"{co['name']} · {t['title']}",
+                            "hint": " · ".join(x for x in [dict(SALES_TYPES).get(t["sales_type"]),
+                                                            f"deadline {str(t['deadline'])[:10]}" if t.get("deadline") else "",
+                                                            f"{t['days_in_phase']} dage i fasen" if t.get("days_in_phase") is not None and t.get("phase") else ""] if x),
+                            "current": t.get("phase"),
+                            "options": TENDER_PHASES[t["sales_type"]] + TENDER_CLOSED + [["ved_ikke", "Ved ikke"]]}
+                           for co, ctx in customers for t in typed(ctx)]
+            untyped = [(co, ctx) for co, ctx in customers if not typed(ctx)]
+            unknown_type = [(co, ctx) for co, ctx in untyped if not ctx["sales_type"] or ctx["sales_type"] == "ved_ikke"]
             if unknown_type:
                 items.append(("matrix", None, None, None, "Direkte salg eller udbud?",
                               {"target": "sales_type", "input": "choice", "options": SALES_TYPES,
                                "hint": "Ét klik pr. kunde. Svaret gemmes på kunden, så du ikke bliver spurgt igen.",
                                "rows": rows(unknown_type, "sales_type")}))
-            items.append(("matrix", None, None, None, "Hvor i forløbet er kunderne nu?",
-                          {"target": "sales_phase", "input": "select", "options": SALES_PHASES,
-                           "hint": "Vælg fasen for hver kunde. Står den rigtigt fra sidst, så tryk ”Alle uændrede”.",
-                           "rows": rows(customers, "sales_phase")}))
+            if tender_rows:
+                items.append(("matrix", None, None, None, "Hvor er tilbuddene i forløbet nu?",
+                              {"target": "tender_phase", "input": "select", "options": [],
+                               "hint": "Vælg fasen for hvert tilbud. Skiftet gemmes med dags dato. Står den rigtigt fra sidst, så tryk ”Alle uændrede”.",
+                               "rows": tender_rows}))
+            if untyped:
+                items.append(("matrix", None, None, None, "Hvor i forløbet er kunderne nu?",
+                              {"target": "sales_phase", "input": "select", "options": SALES_PHASES,
+                               "hint": "Vælg fasen for hver kunde. Står den rigtigt fra sidst, så tryk ”Alle uændrede”.",
+                               "rows": rows(untyped, "sales_phase")}))
             ranked = sorted(customers, key=lambda x: -x[1]["priority"])
             detailed = [c for c in ranked[:MAX_DETAILED_CUSTOMERS] if c[0]["id"] not in carried_companies]
             rest = [c for c in ranked[MAX_DETAILED_CUSTOMERS:] if c[0]["id"] not in carried_companies]
@@ -4292,7 +4386,9 @@ class handler(BaseHTTPRequestHandler):
                 for cid, val in (a.get("rows") or {}).items():
                     if not val:
                         continue
-                    if ctx.get("target") == "sales_type" and val != "ved_ikke":
+                    if ctx.get("target") == "tender_phase" and val != "ved_ikke":
+                        self._set_tender_phase(db, int(cid), val, who, "indrapportering")
+                    elif ctx.get("target") == "sales_type" and val != "ved_ikke":
                         db.execute("UPDATE companies SET sales_type = %s WHERE id = %s", (val, int(cid)))
                     elif ctx.get("target") == "sales_phase" and val != "ved_ikke":
                         db.execute("""UPDATE companies SET sales_phase = %s, sales_phase_updated = CURRENT_DATE,
@@ -4710,7 +4806,10 @@ class handler(BaseHTTPRequestHandler):
                 self._error(404, "Forslaget findes ikke længere"); return True
             for act in sug["actions"]:
                 if act["type"] == "tender_status":
-                    db.execute("UPDATE tenders SET status = %s WHERE id = %s", (act["status"], act["id"]))
+                    st = (db.execute("SELECT sales_type FROM tenders WHERE id = %s", (act["id"],)).fetchone() or {}).get("sales_type")
+                    phase = TENDER_STATUS_TO_PHASE.get(act["status"]) or ("afleveret" if st == "udbud" else "tilbud" if st == "direkte" else None)
+                    if not (phase and self._set_tender_phase(db, act["id"], phase, rnd.get("respondent_name"), "indrapportering")):
+                        db.execute("UPDATE tenders SET status = %s WHERE id = %s", (act["status"], act["id"]))
                     log_audit(db, uid, "update", "tender", act["id"], act["label"], {"status": act["status"]})
                 elif act["type"] == "close_task":
                     db.execute("UPDATE tasks SET status = 'done', completed_at = CURRENT_TIMESTAMP WHERE id = %s", (act["id"],))

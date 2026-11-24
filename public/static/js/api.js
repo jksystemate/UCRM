@@ -136,6 +136,7 @@ export const api = {
     createTenderNote: (id, data) => request(`/tenders/${id}/notes`, { method: 'POST', body: JSON.stringify(data) }),
     updateTenderNote: (id, data) => request(`/tender-notes/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
     getTenderHistory: (id) => request(`/tenders/${id}/history`),
+    getTenderPhases: (id) => request(`/tenders/${id}/phases`),
 
     // Audit log
     getAuditLog: (params = {}) => {

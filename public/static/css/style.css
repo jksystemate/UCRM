@@ -968,3 +968,18 @@ th.cursor-pointer:hover { color: #374151; }
 .cal-day:disabled { color: #c9d3da; cursor: default; }
 .cal-picked { margin-top: 10px; text-align: center; font-weight: 600; color: #194b66; }
 .cal-picked::first-letter { text-transform: uppercase; }
+
+/* Faser på et tilbud */
+.phase-steps { display: flex; gap: 0; overflow-x: auto; }
+.phase-step { flex: 1; min-width: 96px; position: relative; padding-top: 18px; text-align: center; }
+.phase-step::before { content: ''; position: absolute; top: 6px; left: 0; right: 0; height: 2px; background: #e5e7eb; }
+.phase-step:first-child::before { left: 50%; } .phase-step:last-child::before { right: 50%; }
+.phase-step.done::before, .phase-step.cur::before { background: #93c5fd; }
+.phase-dot { position: absolute; top: 0; left: 50%; width: 14px; height: 14px; margin-left: -7px; border-radius: 50%; background: #fff; border: 2px solid #d1d5db; }
+.phase-step.done .phase-dot { background: #93c5fd; border-color: #93c5fd; }
+.phase-step.cur .phase-dot { background: #2563eb; border-color: #2563eb; box-shadow: 0 0 0 3px #dbeafe; }
+.phase-step.cur.closed-vundet .phase-dot { background: #16a34a; border-color: #16a34a; box-shadow: 0 0 0 3px #dcfce7; }
+.phase-step.cur.closed-tabt .phase-dot, .phase-step.cur.closed-droppet .phase-dot { background: #dc2626; border-color: #dc2626; box-shadow: 0 0 0 3px #fee2e2; }
+.phase-name { font-size: 12px; color: #6b7280; padding: 4px 4px 0; line-height: 1.25; }
+.phase-step.cur .phase-name { color: #111827; font-weight: 600; }
+.phase-date { font-size: 11px; color: #9ca3af; }

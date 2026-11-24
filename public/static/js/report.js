@@ -331,18 +331,19 @@ function matrixCard(it) {
         list.innerHTML = '';
         for (const r of c.rows || []) {
             const val = (a().rows || {})[r.company_id];
+            const opts = r.options || c.options;  // tilbud har egne faser afhængigt af salgsform
             let control;
             if (c.input === 'select') {
                 control = h('select', { className: `mx-sel ${val ? 'set' : ''}` },
                     h('option', { value: '' }, 'Vælg fase…'),
-                    ...c.options.map(([k, l]) => h('option', { value: k, ...(val === k ? { selected: true } : {}) }, l)));
+                    ...opts.map(([k, l]) => h('option', { value: k, ...(val === k ? { selected: true } : {}) }, l)));
                 control.addEventListener('change', () => { setRow(r.company_id, control.value); control.classList.toggle('set', !!control.value); });
             } else {
                 control = chips(c.options.map(([k, l]) => [k, l, k === 'ved_ikke' || k === 'ikke_startet' ? 'warn' : k === 'done' ? 'good' : '']), val, k => { setRow(r.company_id, k); if (c.target === 'news' || c.target === 'tasks') draw(); });
             }
             const row = h('div', { className: 'mx-row' },
                 h('div', { className: 'mx-name' }, h('b', {}, r.name), r.hint ? h('small', {}, r.hint) : null,
-                    r.current && c.target === 'sales_phase' ? h('small', { className: 'mx-cur' }, `Sidst: ${(c.options.find(o => o[0] === r.current) || [])[1] || r.current}`) : null),
+                    r.current && ['sales_phase', 'tender_phase'].includes(c.target) ? h('small', { className: 'mx-cur' }, `Nu: ${(opts.find(o => o[0] === r.current) || [])[1] || r.current}`) : null),
                 control);
             list.appendChild(row);
             if ((c.target === 'news' && val === 'ja') || (c.target === 'tasks' && val && val !== 'done')) {
@@ -358,7 +359,7 @@ function matrixCard(it) {
     return h('div', { className: 'card' },
         h('div', { className: 'card-h' }, h('span', { className: 'check' }, '✓'), h('div', { className: 'card-t' }, it.title)),
         c.hint ? h('div', { className: 'hint' }, c.hint) : null,
-        c.target === 'sales_phase' && withCurrent.length ? h('button', { type: 'button', className: 'ghost', style: 'margin-top:8px', onClick: () => {
+        ['sales_phase', 'tender_phase'].includes(c.target) && withCurrent.length ? h('button', { type: 'button', className: 'ghost', style: 'margin-top:8px', onClick: () => {
             const rows = { ...(a().rows || {}) };
             for (const r of withCurrent) if (!rows[r.company_id]) rows[r.company_id] = r.current;
             it.answer = { ...a(), rows }; save(it); draw();

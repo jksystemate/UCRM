@@ -6276,6 +6276,7 @@ function todoRow(a, cfg, users, late, sigs = []) {
                 h('div', { className: 'flex flex-wrap gap-2 mt-0.5 items-center text-xs text-gray-500' },
                     a.area && GOAL_AREAS[a.area] ? h('span', { className: `area-pill area-${a.area}` }, a.area === 'tvaers' ? 'Tværgående' : GOAL_AREAS[a.area]) : null,
                     cl.length ? h('span', {}, `${cl.filter(c => c.done).length}/${cl.length} punkter`) : null,
+                    a.recurrence ? h('span', { title: 'Næste opgave oprettes, når denne er udført' }, `↻ ${RECURRENCE_LABELS[a.recurrence] || ''}`) : null,
                     a.goal_title ? h('span', {}, `Mål: ${a.goal_title}`) : null,
                     a.meeting_date ? h('span', {}, `fra møde ${formatDate(a.meeting_date)}`) : null,
                     a.notes ? h('span', {}, `Sidst: ${a.notes.split('\n').pop().slice(0, 60)}`) : null,
@@ -6284,6 +6285,8 @@ function todoRow(a, cfg, users, late, sigs = []) {
         detail);
     return row;
 }
+
+const RECURRENCE_LABELS = { maaned: 'Hver måned', kvartal: 'Hvert kvartal', halvaar: 'Hvert halve år', aar: 'Hvert år' };
 
 function showTaskEditForm(existing, cfg, users) {
     const a = existing || { area: 'tvaers', owner: 'CEO', due_date: addDaysIso(14), checklist: [] };
@@ -6295,8 +6298,9 @@ function showTaskEditForm(existing, cfg, users) {
         const fd = new FormData(e.target);
         const prev = Object.fromEntries((a.checklist || []).map(c => [c.text, c.done]));
         const data = { kind: 'aktion', title: fd.get('title'), owner: fd.get('owner') || null, due_date: fd.get('due_date') || null,
-            area: fd.get('area'), description: fd.get('description') || null,
+            area: fd.get('area'), description: fd.get('description') || null, recurrence: fd.get('recurrence') || null,
             checklist: String(fd.get('checklist') || '').split('\n').map(x => x.trim()).filter(Boolean).map(t => ({ text: t, done: !!prev[t] })) };
+        if (data.recurrence && !data.due_date) { alert('En opgave der gentages, skal have en frist. Den næste frist regnes ud fra den.'); return; }
         try { existing ? await api.updateAction(existing.id, data) : await api.createAction(data); closeModal(); router(); }
         catch (err) { alert(err.message); }
     }},
@@ -6310,6 +6314,11 @@ function showTaskEditForm(existing, cfg, users) {
                 h('select', { name: 'area', className: 'w-full border border-gray-300 rounded-lg px-3 py-2' },
                     ...Object.entries({ tvaers: 'Tværgående / organisation', salg: 'Salg & marketing', leverance: 'Leverance', oekonomi: 'Økonomi' })
                         .map(([k, v]) => h('option', { value: k, ...(a.area === k ? { selected: '' } : {}) }, v))))),
+        h('div', {}, h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, 'Gentages'),
+            h('select', { name: 'recurrence', className: 'w-full border border-gray-300 rounded-lg px-3 py-2' },
+                h('option', { value: '' }, 'Nej, kun én gang'),
+                ...Object.entries(RECURRENCE_LABELS).map(([k, v]) => h('option', { value: k, ...(a.recurrence === k ? { selected: '' } : {}) }, v))),
+            h('div', { className: 'text-xs text-gray-500 mt-1' }, 'Når opgaven er udført, opretter appen den næste med ny frist og en nulstillet tjekliste. Der sendes ikke noget til lederen.')),
         h('div', {}, h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, 'Beskrivelse'),
             h('textarea', { name: 'description', rows: '2', className: 'w-full border border-gray-300 rounded-lg px-3 py-2' }, a.description || '')),
         h('div', {},

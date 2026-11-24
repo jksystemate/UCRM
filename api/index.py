@@ -106,6 +106,29 @@ ANSWER_FORMAT_RULES = (
     "Det afklares i en fælles klik-liste. Max 3 spørgsmål pr. emne, og hellere 2.")
 
 
+RECURRENCE_MONTHS = {"maaned": 1, "kvartal": 3, "halvaar": 6, "aar": 12}
+
+
+def _add_months(d, months):
+    """Lægger måneder til en dato. Står fristen på sidste dag i måneden, bliver den der (31/12 → 31/3 → 30/6)."""
+    import calendar
+    last = d.day == calendar.monthrange(d.year, d.month)[1]
+    y, m = divmod(d.month - 1 + months, 12)
+    y, m = d.year + y, m + 1
+    days = calendar.monthrange(y, m)[1]
+    return date(y, m, days if last else min(d.day, days))
+
+
+def _next_due(due, recurrence, today=None):
+    """Næste frist for en gentaget opgave: én periode efter den gamle frist, men aldrig i fortiden."""
+    months = RECURRENCE_MONTHS[recurrence]
+    today = today or date.today()
+    nxt = _add_months(due or today, months)
+    while nxt < today:
+        nxt = _add_months(nxt, months)
+    return nxt
+
+
 def _goal_needs_status(g):
     """Status kræves først, når målet er startet og har kørt i 30 dage (ellers er der intet at melde)."""
     start = str(g.get("start_date") or g.get("created_at") or "")[:10]
@@ -652,6 +675,8 @@ def init_db():
             "ALTER TABLE meeting_actions ADD COLUMN IF NOT EXISTS description TEXT",
             "ALTER TABLE meeting_actions ADD COLUMN IF NOT EXISTS checklist JSONB DEFAULT '[]'::jsonb",
             "ALTER TABLE meeting_actions ADD COLUMN IF NOT EXISTS notes TEXT",
+            "ALTER TABLE meeting_actions ADD COLUMN IF NOT EXISTS recurrence TEXT",
+            "ALTER TABLE meeting_actions ADD COLUMN IF NOT EXISTS next_action_id INTEGER REFERENCES meeting_actions(id) ON DELETE SET NULL",
             "ALTER TABLE tenders ADD COLUMN IF NOT EXISTS via_group_id INTEGER REFERENCES companies(id) ON DELETE SET NULL",
             """CREATE TABLE IF NOT EXISTS app_settings (
                 key TEXT PRIMARY KEY,
@@ -2846,6 +2871,19 @@ class handler(BaseHTTPRequestHandler):
             g["quality"], g["quality_missing"] = goal_quality(g)
         return rows
 
+    def _spawn_next_occurrence(self, db, aid):
+        """Når en gentaget opgave er udført, oprettes næste gang med ny frist og nulstillet tjekliste (kun én gang)."""
+        a = db.execute("SELECT * FROM meeting_actions WHERE id = %s", (aid,)).fetchone()
+        if not a or a["status"] != "done" or a["recurrence"] not in RECURRENCE_MONTHS or a["next_action_id"]:
+            return None
+        cl = [{"text": c.get("text"), "done": False} for c in (a["checklist"] or [])]
+        new = db.execute("""INSERT INTO meeting_actions (area, goal_id, company_id, kind, title, owner, due_date, description, checklist, recurrence)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                         (a["area"], a["goal_id"], a["company_id"], a["kind"], a["title"], a["owner"],
+                          _next_due(a["due_date"], a["recurrence"]), a["description"], json.dumps(cl), a["recurrence"])).fetchone()["id"]
+        db.execute("UPDATE meeting_actions SET next_action_id = %s WHERE id = %s", (new, aid))
+        return new
+
     def _action_rows(self, db, where="", params=None):
         return [dict(r) for r in db.execute(f"""
             SELECT a.*, g.title AS goal_title, co.name AS company_name, m.meeting_date AS meeting_date
@@ -2875,7 +2913,7 @@ class handler(BaseHTTPRequestHandler):
                        "target_value", "current_value", "start_date", "due_date", "status", "archived", "document_url", "parent_goal_id", "measure"]
         MEETING_FIELDS = ["area", "title", "meeting_date", "participants", "status", "summary", "next_meeting_date"]
         ACTION_FIELDS = ["meeting_id", "area", "goal_id", "company_id", "kind", "title", "owner", "due_date", "status",
-                         "description", "checklist", "notes"]
+                         "description", "checklist", "notes", "recurrence"]
         def action_vals(src):
             vals = {k: blank_to_none(src.get(k)) for k in ACTION_FIELDS if k in src}
             if "checklist" in vals:
@@ -3192,9 +3230,13 @@ class handler(BaseHTTPRequestHandler):
                 if "status" in body:
                     vals["done_at"] = datetime.now() if body["status"] == "done" else None
                     vals["closed_in_meeting_id"] = body.get("closed_in_meeting_id") if body["status"] == "done" else None
+                if "recurrence" in vals and vals["recurrence"] not in RECURRENCE_MONTHS:
+                    vals["recurrence"] = None
                 if vals:
                     sets = ", ".join(f"{k} = %s" for k in vals)
                     db.execute(f"UPDATE meeting_actions SET {sets} WHERE id = %s", list(vals.values()) + [rid])
+                    if body.get("status") == "done":
+                        self._spawn_next_occurrence(db, rid)
                     db.commit()
                 rows = self._action_rows(db, "AND a.id = %s", (rid,))
                 if not rows:
@@ -4262,6 +4304,7 @@ class handler(BaseHTTPRequestHandler):
                         if val == "done":
                             db.execute("""UPDATE meeting_actions SET status = 'done', done_at = CURRENT_TIMESTAMP,
                                           notes = COALESCE(notes || E'\n', '') || %s WHERE id = %s AND status = 'open'""", (line, int(cid)))
+                            self._spawn_next_occurrence(db, int(cid))
                         else:
                             db.execute("UPDATE meeting_actions SET notes = COALESCE(notes || E'\n', '') || %s WHERE id = %s", (line, int(cid)))
                     elif ctx.get("target") == "news" and val == "ja" and (a.get("notes") or {}).get(cid):

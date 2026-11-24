@@ -830,3 +830,9 @@ th.cursor-pointer:hover { color: #374151; }
 .fin-sev { font-size: 11px; font-weight: 700; padding: 1px 8px; border-radius: 999px; background: #e5e7eb; color: #374151; }
 .fin-sev.sev-kritisk { background: #fee2e2; color: #b91c1c; }
 .fin-sev.sev-vigtig { background: #fef3c7; color: #b45309; }
+
+/* Login */
+.login-screen { position: fixed; inset: 0; z-index: 100; background: #f3f5f8; display: flex; align-items: center; justify-content: center; padding: 16px; }
+.login-card { width: 100%; max-width: 360px; background: #fff; border: 1px solid #e5e7eb; border-radius: 16px; padding: 28px; box-shadow: 0 10px 30px rgba(15, 23, 42, .08); }
+.nav-logout { display: block; margin: 4px 12px 0; font-size: 12px; color: #6b7280; background: none; border: 0; cursor: pointer; padding: 0; }
+.nav-logout:hover { color: #111827; text-decoration: underline; }

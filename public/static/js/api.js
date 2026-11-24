@@ -10,6 +10,8 @@ async function request(path, options = {}) {
     if (userId) headers['X-User-Id'] = userId;
     const res = await fetch(`${BASE}${path}`, { headers, ...options });
     if (res.status === 204) return null;
+    // Session udløbet eller ikke logget ind: appen viser login-skærmen
+    if (res.status === 401 && !path.startsWith('/login')) window.dispatchEvent(new CustomEvent('ucrm-login-required'));
     if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: 'Ukendt fejl' }));
         throw new Error(err.detail || `HTTP ${res.status}`);
@@ -159,6 +161,10 @@ export const api = {
     updateDecayRules: (data) => request('/settings/decay-rules', { method: 'PUT', body: JSON.stringify(data) }),
 
     // SystemateCEO: mål, ledermøder og aktioner
+    // Login
+    getSession: () => request('/session'),
+    login: (password) => request('/login', { method: 'POST', body: JSON.stringify({ password }) }),
+    logout: () => request('/logout', { method: 'POST' }),
     getCeoOverview: () => request('/ceo/overview'),
     // Økonomi: budget og saldobalance
     getFinanceBudget: () => request('/finance/budget'),

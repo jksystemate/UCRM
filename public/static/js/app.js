@@ -1,4 +1,4 @@
-import { api } from './api.js?v=55';
+import { api } from './api.js?v=56';
 
 // ─── Constants ───
 const CATEGORY_LABELS = { opkald:'Opkald', tilbud:'Tilbud', moede:'Møde', opfølgning:'Opfølgning', demo:'Demo', kontrakt:'Kontrakt', implementering:'Implementering', support:'Support', faktura:'Fakturering', budget:'Budget', generelt:'Generelt' };
@@ -98,7 +98,32 @@ async function router() {
 }
 
 window.addEventListener('hashchange', () => { window.scrollTo(0, 0); router(); });
-window.addEventListener('load', () => {
+// Login: hele appen kræver CEO'ens adgangskode (APP_PASSWORD i Vercel)
+function showLoginScreen(configured = true) {
+    if (document.getElementById('login-screen')) return;
+    const pw = h('input', { type: 'password', autocomplete: 'current-password', placeholder: 'Adgangskode', className: 'w-full border border-gray-300 rounded-lg px-3 py-2', required: '' });
+    const err = h('div', { className: 'text-sm text-red-600 min-h-[20px]' }, configured ? '' : 'Login er ikke sat op endnu: APP_PASSWORD mangler i Vercel.');
+    const btn = h('button', { type: 'submit', className: 'w-full bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 font-medium' }, 'Log ind');
+    const form = h('form', { className: 'space-y-3', onSubmit: async (e) => {
+        e.preventDefault();
+        btn.disabled = true; btn.textContent = 'Logger ind…'; err.textContent = '';
+        try { await api.login(pw.value); location.reload(); }
+        catch (ex) { err.textContent = ex.message; btn.disabled = false; btn.textContent = 'Log ind'; pw.select(); }
+    } }, pw, err, btn);
+    document.body.appendChild(h('div', { id: 'login-screen', className: 'login-screen' },
+        h('div', { className: 'login-card' },
+            h('div', { className: 'text-xl font-bold text-gray-900 mb-1' }, 'SystemateCEO'),
+            h('p', { className: 'text-sm text-gray-500 mb-4' }, 'Log ind for at se data.'),
+            form)));
+    setTimeout(() => pw.focus(), 50);
+}
+window.addEventListener('ucrm-login-required', () => showLoginScreen());
+
+window.addEventListener('load', async () => {
+    const session = await api.getSession().catch(() => ({ authenticated: false, configured: true }));
+    if (!session.authenticated) { showLoginScreen(session.configured); return; }
+    const nav = document.querySelector('.nav-version');
+    if (nav) nav.after(h('button', { className: 'nav-logout', onClick: async () => { await api.logout(); location.reload(); } }, 'Log ud'));
     initUserSelector();
     initGlobalSearch();
     initNotifications();

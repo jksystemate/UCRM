@@ -153,6 +153,37 @@ def _next_due(due, recurrence, today=None):
     return nxt
 
 
+# ─── Login: kun CEO'en har adgang til appen ───
+# Adgangskoden ligger i miljøvariablen APP_PASSWORD (sat i Vercel). Sessionen er en signeret cookie,
+# så skift af adgangskoden logger alle sessioner ud. Ledernes indrapporteringslinks (/api/r/) og cron er undtaget.
+SESSION_COOKIE = "ucrm_session"
+SESSION_DAYS = 30
+PUBLIC_API = ("/api/login", "/api/logout", "/api/session")
+PUBLIC_API_PREFIXES = ("/api/r/", "/api/cron/")
+
+
+def _session_key():
+    import hashlib
+    pw = os.environ.get("APP_PASSWORD") or ""
+    return hashlib.sha256(("ucrm-session:" + pw).encode()).digest() if pw else None
+
+
+def make_session_token():
+    import hmac, hashlib, time
+    exp = str(int(time.time()) + SESSION_DAYS * 86400)
+    return exp + "." + hmac.new(_session_key(), exp.encode(), hashlib.sha256).hexdigest()
+
+
+def valid_session_token(token):
+    import hmac, hashlib, time
+    key = _session_key()
+    if not key or not token or "." not in token:
+        return False
+    exp, sig = token.split(".", 1)
+    good = hmac.new(key, exp.encode(), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(sig, good) and exp.isdigit() and int(exp) > time.time()
+
+
 # ─── Økonomi: budget og saldobalance ───
 # Kontoplanens grupper (e-conomic standard). Totalerne regnes ud fra grupperne.
 FIN_GROUPS = [("omsaetning", "Omsætning", 10000, 12999), ("direkte", "Direkte omkostninger", 13000, 14999),
@@ -1379,11 +1410,55 @@ class handler(BaseHTTPRequestHandler):
         self._cors_headers()
         self.end_headers()
 
+    # ── Login ──
+    def _session_cookie(self):
+        from http.cookies import SimpleCookie
+        c = SimpleCookie(self.headers.get("Cookie") or "")
+        return c[SESSION_COOKIE].value if SESSION_COOKIE in c else None
+
+    def _blocked(self, path):
+        """Sender 401 og returnerer True, hvis kaldet kræver login, og der ikke er en gyldig session."""
+        if not path.startswith("/api/") or path in PUBLIC_API or path.startswith(PUBLIC_API_PREFIXES):
+            return False
+        if valid_session_token(self._session_cookie()):
+            return False
+        self._error(401, "Log ind for at fortsætte" if os.environ.get("APP_PASSWORD") else "Login er ikke sat op: APP_PASSWORD mangler i Vercel")
+        return True
+
+    def _send_session(self, data, token, max_age):
+        body = json.dumps(data).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Set-Cookie", f"{SESSION_COOKIE}={token}; Path=/; Max-Age={max_age}; HttpOnly; Secure; SameSite=Lax")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_login(self, method, path, body):
+        if path == "/api/session":
+            self._json_response({"authenticated": valid_session_token(self._session_cookie()), "configured": bool(os.environ.get("APP_PASSWORD"))})
+        elif path == "/api/logout":
+            self._send_session({"ok": True}, "", 0)
+        elif path == "/api/login" and method == "POST":
+            import hmac, time
+            pw = os.environ.get("APP_PASSWORD")
+            if not pw:
+                self._error(503, "Login er ikke sat op: APP_PASSWORD mangler i Vercel"); return
+            if not hmac.compare_digest(str(body.get("password") or "").encode(), pw.encode()):
+                time.sleep(1)  # gør gætteri langsomt
+                self._error(401, "Forkert adgangskode"); return
+            self._send_session({"ok": True}, make_session_token(), SESSION_DAYS * 86400)
+        else:
+            self._error(404, "Endpoint not found")
+
     def do_GET(self):
         try:
             parsed = urlparse(self.path)
             path = parsed.path
             params = parse_qs(parsed.query)
+            if path in PUBLIC_API:
+                return self._handle_login("GET", path, {})
+            if self._blocked(path):
+                return
             if path.startswith("/api/"):
                 self._handle_api_get(path, params)
             else:
@@ -1396,6 +1471,11 @@ class handler(BaseHTTPRequestHandler):
             parsed = urlparse(self.path)
             path = parsed.path
             content_type = self.headers.get("Content-Type", "")
+            if path in PUBLIC_API:
+                length = int(self.headers.get("Content-Length", 0))
+                return self._handle_login("POST", path, json.loads(self.rfile.read(length)) if length else {})
+            if self._blocked(path):
+                return
             if "multipart/form-data" in content_type:
                 self._handle_file_upload(path)
             elif path.startswith("/api/"):
@@ -1408,6 +1488,8 @@ class handler(BaseHTTPRequestHandler):
     def do_PUT(self):
         try:
             parsed = urlparse(self.path)
+            if self._blocked(parsed.path):
+                return
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length)) if length else {}
             self._handle_api_put(parsed.path, body)
@@ -1417,6 +1499,8 @@ class handler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         try:
             parsed = urlparse(self.path)
+            if self._blocked(parsed.path):
+                return
             self._handle_api_delete(parsed.path)
         except Exception as e:
             self._error(500, str(e))

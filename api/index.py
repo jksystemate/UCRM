@@ -255,7 +255,36 @@ def parse_budget_xlsx(data):
     months = sorted({m for a in accounts.values() for m in a["months"]})
     if not accounts or not months:
         raise ValueError("Fandt ingen konti med beløb pr. måned. Er det fanen 'Budget' med kontonumre i kolonne A?")
-    return {"accounts": accounts, "liquidity": liquidity, "first_month": months[0], "last_month": months[-1]}
+    return {"accounts": accounts, "liquidity": liquidity, "first_month": months[0], "last_month": months[-1],
+            "digest": _workbook_digest(wb)}
+
+
+def _workbook_digest(wb):
+    """Hele budgetfilen som tekst (én linje pr. række, celler adskilt af |), så AI kan svare på spørgsmål og regne konsekvenser.
+    Arbejdskalendere og den gamle likviditetsfane med #REF!-fejl udelades."""
+    def fmt(v):
+        if v is None:
+            return ""
+        if hasattr(v, "year"):
+            return f"{v.year:04d}-{v.month:02d}"
+        if isinstance(v, float):
+            return str(round(v)) if abs(v) >= 100 else (f"{v:.4f}".rstrip("0").rstrip(".") or "0")
+        return str(v).strip().replace("\n", " ")
+    parts = []
+    for ws in wb.worksheets:
+        if ws.title.lower().startswith("arbejdskalender") or ws.title == "Likviditetsbudget":
+            continue
+        rows = []
+        for r in ws.iter_rows(values_only=True):
+            cells = [fmt(v) for v in r]
+            while cells and cells[-1] == "":
+                cells.pop()
+            if any(c and c != "0" for c in cells):
+                rows.append("|".join(cells))
+        parts.append(f"### Fane: {ws.title}\n" + "\n".join(rows))
+    return "\n\n".join(parts)
+
+
 
 
 def parse_balance(filename, data):
@@ -2741,6 +2770,63 @@ class handler(BaseHTTPRequestHandler):
             "questions_for_cfo": {"type": "array", "items": {"type": "string"}}}}
         return self._claude(system, "Tal (JSON):\n" + json.dumps(payload, ensure_ascii=False, default=_json_default), schema, effort="low", max_tokens=6000)
 
+    def _fin_ask(self, db, question, history):
+        """Spørgsmål til det aktive budget. AI har hele budgetfilen og seneste saldobalance og regner med kode (code execution)."""
+        import anthropic
+        b = db.execute("SELECT filename, data FROM finance_budgets ORDER BY id DESC LIMIT 1").fetchone()
+        if not b:
+            raise ValueError("Indlæs et budget først")
+        digest = (b["data"] or {}).get("digest")
+        if not digest:
+            raise ValueError("Indlæs budgetfilen igen, så AI kan læse alle fanerne (den blev indlæst før denne funktion fandtes)")
+        bal = db.execute("SELECT * FROM finance_balances ORDER BY period_end DESC, id DESC LIMIT 1").fetchone()
+        actual = ""
+        if bal:
+            c = self._fin_compare(db, dict(bal))
+            actual = ("\n\n## Seneste saldobalance (faktiske tal), måned " + c["month"] + "\n"
+                      + json.dumps({"grupper": c["groups"], "totaler": c["totals"],
+                                    "balance": [{k: v for k, v in x.items() if k != "accounts"} for x in c["balance"]]},
+                                   ensure_ascii=False, default=_json_default))
+        system = [{"type": "text", "cache_control": {"type": "ephemeral"}, "text": (
+            "Du er en erfaren økonomichef, der hjælper CEO'en i Systemate (konsulentforretning + softwareproduktet Settl) "
+            "med at forstå budgettet og regne konsekvenser af beslutninger. Svar på dansk.\n\n"
+            "Data: Hele den aktive budgetfil " + (b["filename"] or "") + " som tekst. Hver fane starter med '### Fane:', hver linje er en række, "
+            "og cellerne er adskilt af |. De første rækker i en fane er overskrifter (perioder, kolonnenavne som Budget/Settl/Øvrig). "
+            "Beløb er i kr. Indtægter er positive og omkostninger negative.\n\n"
+            "Sådan arbejder du:\n"
+            "- Find de relevante tal i fanerne (fx Summary, Budget, 2023-2028 med Settl/Øvrig-fordeling, Settl, Ansatte, Personaleomkostninger, Likviditet).\n"
+            "- Brug kodeværktøjet til alle beregninger, der ikke er helt trivielle, så tallene er præcise. Skriv tallene ind i koden fra dataene.\n"
+            "- Vælg rimelige forudsætninger, når spørgsmålet kræver det (fx gennemsnitlig lønomkostning pr. medarbejder inkl. pension, "
+            "eller at aktiverede udviklingsomkostninger falder med lønnen), og skriv dem tydeligt.\n"
+            "- Opfind ikke tal. Mangler data, så sig hvad der mangler, og regn med en tydelig antagelse, hvis det giver mening.\n"
+            "- Nævn ikke enkeltpersoners navne eller løn, medmindre CEO'en spørger direkte. Brug roller, antal og gennemsnit.\n\n"
+            "Svarets form (markdown, ingen kodeblokke):\n"
+            "1. Kort svar først (1–3 sætninger med det vigtigste tal).\n"
+            "2. ## Sådan er det regnet: trin med tal, gerne en lille tabel (| kolonne | kolonne |).\n"
+            "3. ## Forudsætninger og forbehold: punktliste.\n"
+            "4. Evt. ## Det bør du overveje: 1–3 konsekvenser eller alternativer.\n\n"
+            "## Budgetfilen\n" + digest + actual)}]
+        msgs = [m for m in (history or []) if m.get("role") in ("user", "assistant") and m.get("content")][-6:]
+        msgs = msgs + [{"role": "user", "content": question}]
+        client = anthropic.Anthropic(timeout=270, max_retries=1)
+        kwargs = dict(model="claude-opus-5-5", max_tokens=16000, output_config={"effort": "medium"},
+                      betas=["server-side-fallback-2026-07-01"], fallbacks="default", system=system,
+                      tools=[{"type": "code_execution_20260521", "name": "code_execution"}])
+        resp = client.beta.messages.create(messages=msgs, **kwargs)
+        # Lange kørsler med kodeværktøjet kan pause; fortsæt i samme container
+        for _ in range(4):
+            if resp.stop_reason != "pause_turn":
+                break
+            msgs = msgs + [{"role": "assistant", "content": resp.model_dump(exclude_none=True)["content"]}]
+            extra = {"container": resp.container.id} if getattr(resp, "container", None) else {}
+            resp = client.beta.messages.create(messages=msgs, **kwargs, **extra)
+        if resp.stop_reason == "refusal":
+            raise RuntimeError("Modellen afviste spørgsmålet")
+        text = "\n".join(bl.text for bl in resp.content if bl.type == "text").strip()
+        if not text:
+            raise RuntimeError("AI gav ikke noget svar. Prøv at stille spørgsmålet mere konkret.")
+        return text, resp.model
+
     def _handle_finance(self, db, method, path, body):
         import base64
         parts = path.strip("/").split("/")  # ['api','finance','balances','3','analyze']
@@ -2749,8 +2835,22 @@ class handler(BaseHTTPRequestHandler):
         sub = parts[4] if len(parts) > 4 else None
         if res == "summary" and method == "GET":
             self._json_response(self._fin_summary(db))
+        elif res == "ask" and method == "POST":
+            q = (body.get("question") or "").strip()
+            if not q:
+                self._error(400, "Skriv et spørgsmål"); return True
+            if not os.environ.get("ANTHROPIC_API_KEY"):
+                self._error(400, "AI er ikke sat op (ANTHROPIC_API_KEY mangler)"); return True
+            try:
+                text, model = self._fin_ask(db, q, body.get("history"))
+            except ValueError as e:
+                self._error(400, str(e)); return True
+            except Exception as e:
+                self._error(502, f"AI kunne ikke svare: {e}"); return True
+            self._json_response({"answer": text, "model": model})
         elif res == "budget" and method == "GET":
-            r = db.execute("SELECT id, filename, first_month, last_month, uploaded_at, (SELECT COUNT(*) FROM jsonb_object_keys(data->'accounts')) AS accounts FROM finance_budgets ORDER BY id DESC LIMIT 1").fetchone()
+            r = db.execute("""SELECT id, filename, first_month, last_month, uploaded_at, (SELECT COUNT(*) FROM jsonb_object_keys(data->'accounts')) AS accounts,
+                              (data ? 'digest') AS has_digest FROM finance_budgets ORDER BY id DESC LIMIT 1""").fetchone()
             self._json_response(dict(r) if r else None)
         elif res == "budget" and method == "POST":
             try:

@@ -1,4 +1,4 @@
-import { api } from './api.js?v=57';
+import { api } from './api.js?v=58';
 
 // ─── Constants ───
 const CATEGORY_LABELS = { opkald:'Opkald', tilbud:'Tilbud', moede:'Møde', opfølgning:'Opfølgning', demo:'Demo', kontrakt:'Kontrakt', implementering:'Implementering', support:'Support', faktura:'Fakturering', budget:'Budget', generelt:'Generelt' };
@@ -957,6 +957,7 @@ async function renderFinance(container) {
                 }),
                 h('label', { className: 'text-xs text-gray-500 flex items-center gap-2' }, 'Måned (valgfri)', monthIn)))));
     container.appendChild(status);
+    if (budget) container.appendChild(financeAskCard(budget));
 
     const list = h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 mt-4' },
         h('div', { className: 'px-5 py-3 border-b border-gray-100 font-semibold text-gray-900' }, 'Indlæste måneder'));
@@ -966,6 +967,48 @@ async function renderFinance(container) {
         h('span', { className: 'text-sm text-gray-500' }, `${b.filename || ''} · ${b.lines} konti`),
         h('span', { className: `ml-auto text-xs font-semibold ${b.analyzed_at ? 'text-green-700' : 'text-gray-400'}` }, b.analyzed_at ? 'Analyseret' : 'Ikke analyseret'), h('span', { className: 'text-gray-300' }, '→')));
     container.appendChild(list);
+}
+
+// Spørg AI om det aktive budget, fx konsekvensberegninger. Samtalen huskes kun, mens siden er åben.
+let _financeChat = [];
+function financeAskCard(budget) {
+    const card = h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-5 mt-4' });
+    const chat = h('div', { className: 'fin-chat' });
+    const draw = () => {
+        chat.innerHTML = '';
+        for (const m of _financeChat) chat.appendChild(m.role === 'user' ? h('div', { className: 'as-q' }, m.content)
+            : h('div', { className: 'as-a md', innerHTML: miniMarkdown(m.content) }));
+    };
+    const input = h('textarea', { rows: '2', className: 'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm',
+        placeholder: 'Fx: Hvor mange skal vi afskedige, for at Settl-investeringen går i nul i 2027?', ...(budget.has_digest ? {} : { disabled: '' }) });
+    const btn = h('button', { className: 'act-btn primary' }, 'Spørg');
+    const ask = async (q) => {
+        q = (q || '').trim(); if (!q) return;
+        _financeChat.push({ role: 'user', content: q }); draw();
+        const wait = h('div', { className: 'as-a text-gray-400' }, 'Regner… Det kan tage et par minutter, fordi AI regner tallene igennem med kode.');
+        chat.appendChild(wait); btn.disabled = true;
+        try { const r = await api.askFinance(q, _financeChat.slice(0, -1)); _financeChat.push({ role: 'assistant', content: r.answer }); }
+        catch (e) { _financeChat.push({ role: 'assistant', content: `Fejl: ${e.message}` }); }
+        btn.disabled = false; draw();
+    };
+    btn.addEventListener('click', () => { const q = input.value; input.value = ''; ask(q); });
+    input.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); btn.click(); } });
+    const examples = ['Hvor mange skal vi afskedige, for at Settl-investeringen går i nul i 2027?',
+        'Hvad sker der med likviditeten, hvis Settl-omsætningen bliver 20 % lavere i 2027?',
+        'Hvornår tjener Settl sig hjem, og hvad er break-even i antal kunder?',
+        'Hvad koster det årligt at ansætte to udviklere mere?'];
+    card.append(
+        h('div', { className: 'flex items-center justify-between gap-3 mb-1' },
+            h('div', { className: 'font-semibold text-gray-900' }, '✦ Spørg om budgettet'),
+            _financeChat.length ? h('button', { className: 'text-xs text-gray-500 hover:underline', onClick: () => { _financeChat = []; draw(); } }, 'Ny samtale') : null),
+        h('p', { className: 'text-sm text-gray-500 mb-3' }, budget.has_digest
+            ? 'AI kender hele budgetfilen og den seneste saldobalance og regner konsekvenser med kode. Svarene viser beregning og forudsætninger, så du kan tjekke dem.'
+            : 'Indlæs budgetfilen igen (knappen ovenfor), så AI kan læse alle fanerne. Den nuværende blev indlæst, før denne funktion fandtes.'),
+        chat,
+        h('div', { className: 'flex flex-wrap gap-2 mb-2' }, ...examples.map(x => h('button', { className: 'fin-chip', ...(budget.has_digest ? {} : { disabled: '' }), onClick: () => ask(x) }, x))),
+        input, h('div', { className: 'flex justify-between items-center mt-2' }, h('span', { className: 'text-xs text-gray-400' }, '⌘/Ctrl + Enter sender'), btn));
+    draw();
+    return card;
 }
 
 async function renderFinanceDetail(container, id) {
@@ -5047,13 +5090,29 @@ async function showReportRequestForm(m) {
 function miniMarkdown(text) {
     const esc = String(text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const out = []; let inList = false;
+    let table = null;
+    const flushTable = () => {
+        if (!table) return;
+        const [head, ...body] = table;
+        out.push(`<table class="md-table"><thead><tr>${head.map(c => `<th>${c}</th>`).join('')}</tr></thead><tbody>${body.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table>`);
+        table = null;
+    };
     for (const raw of esc.split('\n')) {
         const line = raw.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+        // Tabel: | a | b |  (skillelinjen |---|---| springes over)
+        if (/^\s*\|.*\|\s*$/.test(line)) {
+            if (inList) { out.push('</ul>'); inList = false; }
+            const cells = line.trim().slice(1, -1).split('|').map(c => c.trim());
+            if (!cells.every(c => /^:?-{2,}:?$/.test(c))) (table = table || []).push(cells);
+            continue;
+        }
+        flushTable();
         if (/^\s*[-*•]\s+/.test(line)) { if (!inList) { out.push('<ul>'); inList = true; } out.push(`<li>${line.replace(/^\s*[-*•]\s+/, '')}</li>`); continue; }
         if (inList) { out.push('</ul>'); inList = false; }
         if (/^#{1,3}\s+/.test(line)) out.push(`<h3>${line.replace(/^#{1,3}\s+/, '')}</h3>`);
         else if (line.trim()) out.push(`<p>${line}</p>`);
     }
+    flushTable();
     if (inList) out.push('</ul>');
     return out.join('');
 }

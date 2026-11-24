@@ -836,3 +836,12 @@ th.cursor-pointer:hover { color: #374151; }
 .login-card { width: 100%; max-width: 360px; background: #fff; border: 1px solid #e5e7eb; border-radius: 16px; padding: 28px; box-shadow: 0 10px 30px rgba(15, 23, 42, .08); }
 .nav-logout { display: block; margin: 4px 12px 0; font-size: 12px; color: #6b7280; background: none; border: 0; cursor: pointer; padding: 0; }
 .nav-logout:hover { color: #111827; text-decoration: underline; }
+
+/* Spørg om budgettet */
+.fin-chat { display: flex; flex-direction: column; gap: 10px; margin-bottom: 12px; }
+.fin-chip { font-size: 12px; padding: 4px 10px; border-radius: 999px; border: 1px solid #e5e7eb; background: #f9fafb; color: #374151; text-align: left; }
+.fin-chip:hover:not([disabled]) { background: #eef2f7; }
+.fin-chip[disabled] { opacity: .5; cursor: default; }
+.md table.md-table { border-collapse: collapse; margin: 8px 0; font-size: 13px; }
+.md table.md-table th, .md table.md-table td { border: 1px solid #e5e7eb; padding: 4px 8px; text-align: left; }
+.md table.md-table th { background: #f9fafb; font-weight: 600; }

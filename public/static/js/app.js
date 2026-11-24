@@ -1,4 +1,4 @@
-import { api } from './api.js?v=52';
+import { api } from './api.js?v=53';
 
 // ─── Constants ───
 const CATEGORY_LABELS = { opkald:'Opkald', tilbud:'Tilbud', moede:'Møde', opfølgning:'Opfølgning', demo:'Demo', kontrakt:'Kontrakt', implementering:'Implementering', support:'Support', faktura:'Fakturering', budget:'Budget', generelt:'Generelt' };
@@ -37,8 +37,6 @@ function tenderBadge(t) {
     return h('span', { className: `inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${TENDER_PHASE_COLORS[t.phase] || (t.sales_type === 'udbud' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700')}` },
         closed ? TENDER_PHASE_LABELS[t.phase] : `${SALES_TYPE_LABELS[t.sales_type] || ''} · ${TENDER_PHASE_LABELS[t.phase] || t.phase}`);
 }
-const SECTION_STATUS_LABELS = { not_started:'Ikke startet', in_progress:'I gang', in_review:'Til review', approved:'Godkendt' };
-const SECTION_STATUS_COLORS = { not_started:'bg-gray-100 text-gray-600', in_progress:'bg-blue-100 text-blue-700', in_review:'bg-yellow-100 text-yellow-700', approved:'bg-green-100 text-green-700' };
 
 // ─── Router ───
 function getRoute() {
@@ -714,7 +712,6 @@ async function renderDashboard(container) {
         const tenderScroll = h('div', { className: 'overflow-y-auto', style: 'max-height:320px' });
         const tenderGrid = h('div', { className: 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3' });
         for (const t of activeTenders) {
-            const progress = t.total_sections > 0 ? Math.round(t.approved_sections / t.total_sections * 100) : 0;
             const today = new Date().toISOString().split('T')[0];
             const isOverdue = t.deadline && t.deadline < today;
             const daysLeft = t.deadline ? Math.ceil((new Date(t.deadline) - new Date()) / 86400000) : null;
@@ -727,12 +724,6 @@ async function renderDashboard(container) {
                 ),
                 t.company_name ? h('div', { className: 'text-xs text-gray-500 truncate mb-2' }, t.title) : null,
                 h('div', { className: 'flex items-center gap-3 text-xs' },
-                    h('div', { className: 'flex-1' },
-                        h('div', { className: 'w-full h-1.5 rounded-full bg-gray-200 overflow-hidden' },
-                            h('div', { className: 'h-full rounded-full bg-blue-500', style: `width:${progress}%` })
-                        )
-                    ),
-                    h('span', { className: 'text-gray-500' }, `${progress}%`),
                     t.deadline ? h('span', { className: isOverdue ? 'text-red-500 font-medium' : daysLeft <= 7 ? 'text-orange-500' : 'text-gray-400' },
                         isOverdue ? `${Math.abs(daysLeft)}d overskredet` : `${daysLeft}d tilbage`
                     ) : null
@@ -2570,14 +2561,7 @@ function renderTenderList(container, tenders, statusFilter) {
                 )
             ),
             h('div', { className: 'text-right flex-shrink-0' },
-                h('div', { className: 'flex items-center gap-2 mb-1' },
-                    h('div', { className: 'w-24 h-2 rounded-full bg-gray-200 overflow-hidden' },
-                        h('div', { className: 'h-full rounded-full bg-blue-500 transition-all', style: `width:${t.progress || 0}%` })
-                    ),
-                    h('span', { className: 'text-xs font-medium text-gray-600 w-8' }, `${t.progress || 0}%`)
-                ),
-                t.deadline ? h('div', { className: `text-sm ${isOverdue ? 'text-red-500 font-medium' : 'text-gray-400'}` }, formatDate(t.deadline)) : null,
-                h('div', { className: 'text-xs text-gray-400' }, `${t.sections_approved || 0}/${t.section_count || 0} sektioner`)
+                t.deadline ? h('div', { className: `text-sm ${isOverdue ? 'text-red-500 font-medium' : 'text-gray-400'}` }, formatDate(t.deadline)) : null
             )
         ));
     }
@@ -2592,7 +2576,7 @@ async function renderTenderDetail(container, id) {
         api.getTenderHistory(id),
         api.getTenderPhases(id).catch(() => [])
     ]);
-    const { tender, sections, users } = data;
+    const { tender, users } = data;
     container.innerHTML = '';
     container.className = 'ml-64 p-8 fade-in';
 
@@ -2651,32 +2635,14 @@ async function renderTenderDetail(container, id) {
     ));
     container.appendChild(tenderPhaseCard(tender, phaseLog, users));
 
-    // Info cards
-    const totalSections = sections.length;
-    const approvedSections = sections.filter(s => s.status === 'approved').length;
-    const progress = totalSections > 0 ? Math.round(approvedSections / totalSections * 100) : 0;
-
-    container.appendChild(h('div', { className: 'grid grid-cols-2 md:grid-cols-4 gap-4 mb-6' },
-        h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-4' },
-            h('div', { className: 'text-2xl font-bold text-blue-600' }, `${progress}%`),
-            h('div', { className: 'text-sm text-gray-500' }, 'Fremgang'),
-            h('div', { className: 'w-full h-2 rounded-full bg-gray-200 mt-2 overflow-hidden' },
-                h('div', { className: 'h-full rounded-full bg-blue-500', style: `width:${progress}%` }))
-        ),
-        h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-4' },
-            h('div', { className: 'text-2xl font-bold text-gray-900' }, `${approvedSections}/${totalSections}`),
-            h('div', { className: 'text-sm text-gray-500' }, 'Sektioner godkendt')
-        ),
-        h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-4' },
-            h('div', { className: 'text-2xl font-bold text-gray-900' }, tender.responsible_name || '-'),
-            h('div', { className: 'text-sm text-gray-500' }, 'Ansvarlig')
-        ),
-        h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-4' },
-            h('div', { className: `text-2xl font-bold ${tender.deadline && tender.deadline < new Date().toISOString().split('T')[0] ? 'text-red-600' : 'text-gray-900'}` },
-                tender.deadline ? formatDate(tender.deadline) : '-'),
-            h('div', { className: 'text-sm text-gray-500' }, 'Deadline')
-        )
-    ));
+    // Nøgletal
+    const card = (value, label, cls = 'text-gray-900') => h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-4' },
+        h('div', { className: `text-2xl font-bold ${cls}` }, value), h('div', { className: 'text-sm text-gray-500' }, label));
+    container.appendChild(h('div', { className: 'grid grid-cols-1 md:grid-cols-3 gap-4 mb-6' },
+        card(tender.responsible_name || '-', 'Ansvarlig'),
+        card(tender.deadline ? formatDate(tender.deadline) : '-', 'Deadline',
+             tender.deadline && tender.deadline < todayIso() && !['won', 'lost', 'dropped'].includes(tender.status) ? 'text-red-600' : 'text-gray-900'),
+        card(tender.estimated_value || '-', 'Estimeret værdi')));
 
     // Description / notes
     if (tender.description || tender.notes || tender.portal_link) {
@@ -2687,406 +2653,11 @@ async function renderTenderDetail(container, id) {
         container.appendChild(infoCard);
     }
 
-    // Gantt timeline — always show if tender has a deadline
-    if (tender.deadline || sections.length > 0) {
-        container.appendChild(renderGanttTimeline(tender, sections, users));
-    }
-
-    // Activity log (notes + history) — after Gantt, before sections
+    // Aktivitetslog (noter + historik)
     renderActivityLog(container, tenderNotes, tenderHistory,
         async (content) => { await api.createTenderNote(id, { content }); router(); },
         async (noteId, content) => { await api.updateTenderNote(noteId, { content }); router(); }
     );
-
-    // Sections header
-    container.appendChild(h('div', { className: 'flex justify-between items-center mb-4' },
-        h('h2', { className: 'text-lg font-bold text-gray-900' }, `Sektioner (${totalSections})`),
-        h('button', {
-            className: 'bg-blue-600 text-white px-3 py-2 rounded-lg hover:bg-blue-700 text-sm font-medium',
-            onClick: () => showSectionForm(id, users, sections.length)
-        }, '+ Tilføj sektion')
-    ));
-
-    // Sections list
-    const sectionList = h('div', { className: 'space-y-3' });
-    if (sections.length === 0) {
-        sectionList.appendChild(h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-8 text-center text-gray-400' },
-            'Ingen sektioner. Tilføj sektioner manuelt eller vaelg en skabelon ved oprettelse.'));
-    }
-    for (const sec of sections) {
-        const today = new Date().toISOString().split('T')[0];
-        const isOverdue = sec.deadline && sec.deadline < today && sec.status !== 'approved';
-        sectionList.appendChild(h('div', {
-            className: `bg-white rounded-xl shadow-sm border border-gray-200 p-5 cursor-pointer ${isOverdue ? 'border-l-4 border-l-red-500' : ''}`,
-            onDblClick: () => showSectionNotes(sec, users)
-        },
-            h('div', { className: 'flex justify-between items-start' },
-                h('div', { className: 'flex-1' },
-                    h('div', { className: 'flex items-center gap-3 flex-wrap' },
-                        h('span', { className: 'text-xs text-gray-400 font-mono' }, `#${sec.sort_order + 1}`),
-                        h('h3', { className: 'font-semibold text-gray-900 cursor-pointer hover:text-blue-600 transition-colors', onClick: (e) => { e.stopPropagation(); showSectionNotes(sec, users); } }, sec.title),
-                        h('span', { className: `inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${SECTION_STATUS_COLORS[sec.status] || ''}` }, SECTION_STATUS_LABELS[sec.status] || sec.status)
-                    ),
-                    sec.description ? h('p', { className: 'text-sm text-gray-500 mt-1' }, sec.description) : null,
-                    h('div', { className: 'flex flex-wrap gap-4 mt-2 text-xs text-gray-500' },
-                        h('span', {}, `Ansvarlig: ${sec.responsible_name || '-'}`),
-                        h('span', {}, `Reviewer: ${sec.reviewer_name || '-'}`),
-                        sec.deadline ? h('span', { className: isOverdue ? 'text-red-500 font-medium' : '' }, `Deadline: ${formatDate(sec.deadline)}`) : null
-                    )
-                ),
-                h('div', { className: 'flex gap-1 items-start flex-shrink-0' },
-                    h('select', {
-                        className: 'text-xs border rounded px-2 py-1',
-                        onChange: async (e) => {
-                            await api.updateTenderSection(sec.id, { status: e.target.value });
-                            router();
-                        }
-                    },
-                        ...Object.entries(SECTION_STATUS_LABELS).map(([k, v]) =>
-                            h('option', Object.assign({ value: k }, sec.status === k ? { selected: '' } : {}), v))
-                    ),
-                    h('button', {
-                        className: 'text-gray-400 hover:text-blue-600 px-2 py-1 text-sm',
-                        onClick: () => showSectionForm(id, users, sections.length, sec)
-                    }, 'Rediger'),
-                    h('button', {
-                        className: 'text-gray-400 hover:text-red-600 px-2 py-1 text-sm',
-                        onClick: async () => {
-                            if (confirm(`Slet sektion "${sec.title}"?`)) { await api.deleteTenderSection(sec.id); router(); }
-                        }
-                    }, 'Slet')
-                )
-            )
-        ));
-    }
-    container.appendChild(sectionList);
-}
-
-// ─── Gantt Timeline ───
-const GANTT_BAR_COLORS = {
-    not_started: '#e5e7eb', in_progress: '#93c5fd',
-    in_review: '#fde68a', approved: '#86efac'
-};
-const GANTT_BAR_BORDERS = {
-    not_started: '#d1d5db', in_progress: '#60a5fa',
-    in_review: '#fbbf24', approved: '#4ade80'
-};
-
-function renderGanttTimeline(tender, sections, users) {
-    const sorted = [...sections].sort((a, b) => a.sort_order - b.sort_order);
-    const tenderStart = new Date(tender.created_at);
-    const tenderEnd = tender.deadline ? new Date(tender.deadline + 'T23:59:59') : new Date();
-    // Extend range to include all section dates
-    for (const s of sorted) {
-        if (s.deadline) {
-            const d = new Date(s.deadline + 'T23:59:59');
-            if (d > tenderEnd) tenderEnd.setTime(d.getTime());
-        }
-        if (s.end_date) {
-            const d = new Date(s.end_date + 'T23:59:59');
-            if (d > tenderEnd) tenderEnd.setTime(d.getTime());
-        }
-        if (s.start_date) {
-            const d = new Date(s.start_date + 'T00:00:00');
-            if (d < tenderStart) tenderStart.setTime(d.getTime());
-        }
-    }
-    const totalMs = Math.max(1, tenderEnd - tenderStart);
-    const today = new Date();
-    const MONTHS_DA = ['jan','feb','mar','apr','maj','jun','jul','aug','sep','okt','nov','dec'];
-
-    const container = h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6' });
-    container.appendChild(h('h2', { className: 'text-lg font-bold text-gray-900 mb-4' }, 'Tidsplan'));
-
-    const scrollOuter = h('div', { style: 'overflow-x:auto;' });
-    const chartWrapper = h('div', { className: 'flex', style: 'min-width:700px;' });
-
-    // Y-axis labels
-    const yAxis = h('div', { className: 'flex-shrink-0', style: 'width:160px; padding-top:24px;' });
-    for (const sec of sorted) {
-        yAxis.appendChild(h('div', {
-            className: 'gantt-label',
-            style: 'height:36px; display:flex; align-items:center;',
-            title: sec.title,
-            onClick: () => showSectionNotes(sec, users)
-        }, `#${sec.sort_order + 1} ${sec.title}`));
-    }
-    chartWrapper.appendChild(yAxis);
-
-    // Chart body
-    const chartBody = h('div', { className: 'flex-1 relative' });
-
-    // X-axis ticks
-    const tickRow = h('div', { className: 'relative', style: 'height:24px;' });
-    const totalDays = Math.ceil(totalMs / (1000 * 60 * 60 * 24));
-    const tickInterval = totalDays > 120 ? 30 : totalDays > 60 ? 14 : 7;
-    const tickDate = new Date(tenderStart);
-    tickDate.setDate(tickDate.getDate() + tickInterval);
-    while (tickDate < tenderEnd) {
-        const pct = ((tickDate - tenderStart) / totalMs) * 100;
-        tickRow.appendChild(h('div', { className: 'gantt-tick', style: `left:${pct}%` },
-            `${tickDate.getDate()}. ${MONTHS_DA[tickDate.getMonth()]}`));
-        tickDate.setDate(tickDate.getDate() + tickInterval);
-    }
-    chartBody.appendChild(tickRow);
-
-    // Rows with bars
-    const rowsContainer = h('div', { className: 'relative' });
-    for (let i = 0; i < sorted.length; i++) {
-        const sec = sorted[i];
-        const row = h('div', { className: 'gantt-row' });
-
-        // Tick grid lines
-        const gridDate = new Date(tenderStart);
-        gridDate.setDate(gridDate.getDate() + tickInterval);
-        while (gridDate < tenderEnd) {
-            const pct = ((gridDate - tenderStart) / totalMs) * 100;
-            row.appendChild(h('div', { className: 'gantt-tick-line', style: `left:${pct}%; top:0; bottom:0;` }));
-            gridDate.setDate(gridDate.getDate() + tickInterval);
-        }
-
-        // Bar — use start_date/end_date if available, fallback to old logic
-        const barStart = sec.start_date
-            ? new Date(sec.start_date + 'T00:00:00')
-            : (i > 0 && (sorted[i - 1].end_date || sorted[i - 1].deadline)
-                ? new Date((sorted[i - 1].end_date || sorted[i - 1].deadline) + 'T00:00:00')
-                : tenderStart);
-        const barEnd = sec.end_date
-            ? new Date(sec.end_date + 'T23:59:59')
-            : (sec.deadline ? new Date(sec.deadline + 'T23:59:59') : tenderEnd);
-        const leftPct = Math.max(0, ((barStart - tenderStart) / totalMs) * 100);
-        const widthPct = Math.max(2, ((barEnd - barStart) / totalMs) * 100);
-        const barColor = GANTT_BAR_COLORS[sec.status] || '#e5e7eb';
-        const barBorder = GANTT_BAR_BORDERS[sec.status] || '#d1d5db';
-
-        const bar = h('div', {
-            className: 'gantt-bar',
-            style: `left:${leftPct}%; width:${widthPct}%; background-color:${barColor}; border:1px solid ${barBorder};`,
-            title: `${sec.title}\n${SECTION_STATUS_LABELS[sec.status] || sec.status}${sec.deadline ? '\nDeadline: ' + formatDate(sec.deadline) : ''}${sec.responsible_name ? '\nAnsvarlig: ' + sec.responsible_name : ''}`,
-            onClick: () => showSectionNotes(sec, users)
-        }, widthPct > 10 ? sec.title : '');
-        row.appendChild(bar);
-        rowsContainer.appendChild(row);
-    }
-
-    // Today line
-    if (today >= tenderStart && today <= tenderEnd) {
-        const todayPct = ((today - tenderStart) / totalMs) * 100;
-        rowsContainer.appendChild(h('div', { className: 'gantt-today-line', style: `left:${todayPct}%` }));
-        tickRow.appendChild(h('div', {
-            className: 'gantt-today-label',
-            style: `left:${todayPct}%`
-        }, 'I dag'));
-    }
-
-    chartBody.appendChild(rowsContainer);
-    chartWrapper.appendChild(chartBody);
-    scrollOuter.appendChild(chartWrapper);
-
-    // Legend
-    const legend = h('div', { className: 'flex flex-wrap gap-4 mt-3 text-xs text-gray-500' });
-    for (const [status, label] of Object.entries(SECTION_STATUS_LABELS)) {
-        legend.appendChild(h('div', { className: 'flex items-center gap-1' },
-            h('div', { style: `width:12px; height:12px; border-radius:3px; background-color:${GANTT_BAR_COLORS[status]};border:1px solid ${GANTT_BAR_BORDERS[status]}` }),
-            label
-        ));
-    }
-    legend.appendChild(h('div', { className: 'flex items-center gap-1' },
-        h('div', { style: 'width:12px; height:2px; background-color:#dc2626;' }),
-        'I dag'
-    ));
-
-    container.appendChild(scrollOuter);
-    container.appendChild(legend);
-    return container;
-}
-
-// ─── Section Notes & Audit Trail ───
-async function showSectionNotes(section, users) {
-    const auditEntries = await api.getSectionAudit(section.id);
-    const container = h('div', { className: 'space-y-5' });
-
-    // ─── Editable fields section ───
-    const editSection = h('div', { className: 'bg-gray-50 rounded-lg p-4 space-y-3' });
-
-    // Status + Deadline row
-    const statusSelect = h('select', { className: 'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm' },
-        ...Object.entries(SECTION_STATUS_LABELS).map(([k, v]) =>
-            h('option', Object.assign({ value: k }, section.status === k ? { selected: '' } : {}), v))
-    );
-    const deadlineInput = h('input', { type: 'date', value: section.deadline || '', className: 'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm' });
-
-    editSection.appendChild(h('div', { className: 'grid grid-cols-2 gap-3' },
-        h('div', {},
-            h('label', { className: 'block text-xs font-medium text-gray-600 mb-1' }, 'Status'),
-            statusSelect
-        ),
-        h('div', {},
-            h('label', { className: 'block text-xs font-medium text-gray-600 mb-1' }, 'Deadline'),
-            deadlineInput
-        )
-    ));
-
-    // Start + End date row
-    const startDateInput = h('input', { type: 'date', value: section.start_date || '', className: 'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm' });
-    const endDateInput = h('input', { type: 'date', value: section.end_date || '', className: 'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm' });
-
-    editSection.appendChild(h('div', { className: 'grid grid-cols-2 gap-3' },
-        h('div', {},
-            h('label', { className: 'block text-xs font-medium text-gray-600 mb-1' }, 'Startdato'),
-            startDateInput
-        ),
-        h('div', {},
-            h('label', { className: 'block text-xs font-medium text-gray-600 mb-1' }, 'Slutdato'),
-            endDateInput
-        )
-    ));
-
-    // Responsible + Reviewer row
-    const responsibleSelect = h('select', { className: 'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm' },
-        h('option', { value: '' }, 'Ingen'),
-        ...users.map(u => h('option', Object.assign({ value: String(u.id) }, section.responsible_id == u.id ? { selected: '' } : {}), u.name))
-    );
-    const reviewerSelect = h('select', { className: 'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm' },
-        h('option', { value: '' }, 'Ingen'),
-        ...users.map(u => h('option', Object.assign({ value: String(u.id) }, section.reviewer_id == u.id ? { selected: '' } : {}), u.name))
-    );
-
-    editSection.appendChild(h('div', { className: 'grid grid-cols-2 gap-3' },
-        h('div', {},
-            h('label', { className: 'block text-xs font-medium text-gray-600 mb-1' }, 'Ansvarlig'),
-            responsibleSelect
-        ),
-        h('div', {},
-            h('label', { className: 'block text-xs font-medium text-gray-600 mb-1' }, 'Reviewer'),
-            reviewerSelect
-        )
-    ));
-
-    // Save changes button
-    const saveFieldsBtn = h('button', {
-        className: 'bg-blue-600 text-white px-4 py-1.5 rounded-lg hover:bg-blue-700 text-sm font-medium',
-        onClick: async () => {
-            try {
-                await api.updateTenderSection(section.id, {
-                    status: statusSelect.value,
-                    deadline: deadlineInput.value || null,
-                    start_date: startDateInput.value || null,
-                    end_date: endDateInput.value || null,
-                    responsible_id: responsibleSelect.value ? parseInt(responsibleSelect.value) : null,
-                    reviewer_id: reviewerSelect.value ? parseInt(reviewerSelect.value) : null,
-                });
-                closeModal();
-                router();
-            } catch (err) { alert(err.message); }
-        }
-    }, 'Gem ændringer');
-    editSection.appendChild(h('div', { className: 'flex justify-end' }, saveFieldsBtn));
-    container.appendChild(editSection);
-
-    // ─── New note input ───
-    const noteInput = h('textarea', {
-        rows: '2', placeholder: 'Skriv en note...',
-        className: 'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:border-blue-500 focus:outline-none'
-    });
-    const addNoteBtn = h('button', {
-        className: 'bg-gray-700 text-white px-4 py-1.5 rounded-lg hover:bg-gray-800 text-sm font-medium',
-        onClick: async () => {
-            const text = noteInput.value.trim();
-            if (!text) return;
-            try {
-                await api.addSectionComment(section.id, text);
-                closeModal();
-                const updated = await api.getTenderFull(section.tender_id);
-                const updatedSec = updated.sections.find(s => s.id === section.id);
-                if (updatedSec) showSectionNotes(updatedSec, updated.users);
-            } catch (err) { alert(err.message); }
-        }
-    }, 'Tilføj note');
-    container.appendChild(h('div', { className: 'border-t pt-4' },
-        h('h3', { className: 'text-sm font-semibold text-gray-700 mb-2' }, 'Tidslinje'),
-        noteInput,
-        h('div', { className: 'flex justify-end mt-1 mb-3' }, addNoteBtn)
-    ));
-
-    // ─── Unified Timeline ───
-    const AUDIT_ICONS = { created: '\u2795', status_change: '\uD83D\uDD04', field_change: '\u270F\uFE0F', note: '\uD83D\uDCDD', comment: '\uD83D\uDCDD' };
-    const DOT_CLASS = { created: 'created', status_change: 'status', field_change: 'field', note: 'note', comment: 'note' };
-    const FIELD_LABELS = { status: 'Status', responsible: 'Ansvarlig', reviewer: 'Reviewer', notes: 'Noter' };
-
-    if (auditEntries.length === 0) {
-        container.appendChild(h('div', { className: 'text-sm text-gray-400 italic py-2' }, 'Ingen aktivitet endnu.'));
-    } else {
-        const timeline = h('div', { className: 'section-timeline max-h-64 overflow-y-auto' });
-
-        for (const entry of auditEntries) {
-            const isContentEntry = entry.note_type === 'comment' && entry.content;
-            const dotClass = DOT_CLASS[entry.note_type] || 'note';
-
-            const entryEl = h('div', { className: 'section-tl-entry' });
-            entryEl.appendChild(h('div', { className: `section-tl-dot ${dotClass}` }));
-
-            if (isContentEntry) {
-                // ─ Note/comment card with expandable content ─
-                const firstLine = entry.content.split('\n')[0];
-                const preview = firstLine.length > 80 ? firstLine.substring(0, 80) + '\u2026' : firstLine;
-                const hasMore = entry.content.length > preview.length || entry.content.includes('\n');
-
-                const card = h('div', { className: 'section-tl-card' });
-                const headerRow = h('div', { className: 'flex items-center gap-2' },
-                    h('span', { className: 'text-xs font-semibold text-gray-600' }, entry.user_name || 'System'),
-                    h('span', { className: 'text-xs text-gray-400' }, formatDate(entry.created_at)),
-                    hasMore ? h('span', { className: 'section-tl-expand-hint' }, 'klik for at åbne') : null
-                );
-                card.appendChild(headerRow);
-
-                const previewEl = h('div', { className: 'tl-preview text-sm text-gray-700 mt-0.5' }, preview);
-                card.appendChild(previewEl);
-
-                if (hasMore) {
-                    const fullEl = h('div', { className: 'tl-full text-sm text-gray-700 mt-1 whitespace-pre-wrap' }, entry.content);
-                    card.appendChild(fullEl);
-
-                    card.addEventListener('click', () => {
-                        card.classList.toggle('expanded');
-                    });
-                }
-
-                entryEl.appendChild(card);
-            } else {
-                // ─ System entry (status change, field change, etc.) ─
-                let detail = '';
-                const icon = AUDIT_ICONS[entry.note_type] || '\uD83D\uDCCC';
-                if (entry.note_type === 'status_change') {
-                    const oldL = SECTION_STATUS_LABELS[entry.old_value] || entry.old_value;
-                    const newL = SECTION_STATUS_LABELS[entry.new_value] || entry.new_value;
-                    detail = `${oldL} \u2192 ${newL}`;
-                } else if (entry.note_type === 'field_change') {
-                    const fl = FIELD_LABELS[entry.field_name] || entry.field_name || '';
-                    detail = `${fl}: ${entry.old_value || '-'} \u2192 ${entry.new_value || '-'}`;
-                } else if (entry.note_type === 'note') {
-                    detail = 'Noter opdateret';
-                } else if (entry.note_type === 'created') {
-                    detail = entry.content || 'Sektion oprettet';
-                } else {
-                    detail = entry.content || '';
-                }
-
-                entryEl.appendChild(h('div', { className: 'section-tl-system' },
-                    h('span', { className: 'mr-1' }, icon),
-                    h('span', {}, detail),
-                    h('span', { className: 'text-xs text-gray-400 ml-2' },
-                        `${entry.user_name || 'System'} \u00B7 ${formatDate(entry.created_at)}`)
-                ));
-            }
-
-            timeline.appendChild(entryEl);
-        }
-
-        container.appendChild(timeline);
-    }
-
-    showModal(`${section.title}`, container);
 }
 
 // Forløbet på et tilbud: faserne for salgsformen, hvornår hver blev nået, og hvor længe det har stået i den nuværende
@@ -3238,74 +2809,6 @@ async function showTenderForm(users, existing = null, prefillCompanyId = null) {
         )
     );
     showModal(isEdit ? 'Rediger tilbud' : 'Nyt tilbud', form);
-}
-
-function showSectionForm(tenderId, users, sectionCount, existing = null) {
-    const isEdit = !!existing;
-    const form = h('form', { className: 'space-y-4', onSubmit: async (e) => {
-        e.preventDefault();
-        const fd = new FormData(e.target);
-        const data = {
-            tender_id: tenderId,
-            title: fd.get('title'),
-            description: fd.get('description') || null,
-            responsible_id: fd.get('responsible_id') ? parseInt(fd.get('responsible_id')) : null,
-            reviewer_id: fd.get('reviewer_id') ? parseInt(fd.get('reviewer_id')) : null,
-            status: fd.get('status') || 'not_started',
-            deadline: fd.get('deadline') || null,
-            start_date: fd.get('start_date') || null,
-            end_date: fd.get('end_date') || null,
-            sort_order: parseInt(fd.get('sort_order') || sectionCount),
-            notes: fd.get('notes') || null,
-        };
-        try {
-            if (isEdit) await api.updateTenderSection(existing.id, data);
-            else await api.createTenderSection(data);
-            closeModal(); router();
-        } catch (err) { alert(err.message); }
-    }},
-        formField('Titel *', 'title', existing?.title || '', 'text', true),
-        h('div', {},
-            h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, 'Beskrivelse'),
-            h('textarea', { name:'description', rows:'2', className:'w-full border border-gray-300 rounded-lg px-3 py-2' }, existing?.description || '')
-        ),
-        h('div', { className: 'grid grid-cols-2 gap-3' },
-            h('div', {},
-                h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, 'Ansvarlig'),
-                h('select', { name:'responsible_id', className:'w-full border border-gray-300 rounded-lg px-3 py-2' },
-                    h('option', { value:'' }, 'Vælg...'),
-                    ...users.map(u => h('option', Object.assign({ value: String(u.id) }, existing?.responsible_id == u.id ? { selected:'' } : {}), u.name))
-                )
-            ),
-            h('div', {},
-                h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, 'Reviewer'),
-                h('select', { name:'reviewer_id', className:'w-full border border-gray-300 rounded-lg px-3 py-2' },
-                    h('option', { value:'' }, 'Vælg...'),
-                    ...users.map(u => h('option', Object.assign({ value: String(u.id) }, existing?.reviewer_id == u.id ? { selected:'' } : {}), u.name))
-                )
-            )
-        ),
-        h('div', { className: 'grid grid-cols-2 gap-3' },
-            formField('Startdato', 'start_date', existing?.start_date || '', 'date'),
-            formField('Slutdato', 'end_date', existing?.end_date || '', 'date')
-        ),
-        h('div', { className: 'grid grid-cols-2 gap-3' },
-            h('div', {},
-                h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, 'Status'),
-                h('select', { name:'status', className:'w-full border border-gray-300 rounded-lg px-3 py-2' },
-                    ...Object.entries(SECTION_STATUS_LABELS).map(([k, v]) =>
-                        h('option', Object.assign({ value: k }, (existing?.status || 'not_started') === k ? { selected:'' } : {}), v))
-                )
-            ),
-            formField('Deadline', 'deadline', existing?.deadline || '', 'date')
-        ),
-        formField('Rækkefølge', 'sort_order', String(existing?.sort_order ?? sectionCount), 'number'),
-        h('div', { className: 'flex justify-end gap-3 pt-2' },
-            h('button', { type:'button', className:'px-4 py-2 text-gray-600 hover:text-gray-800', onClick: closeModal }, 'Annuller'),
-            h('button', { type:'submit', className:'bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 font-medium' }, isEdit ? 'Gem' : 'Tilføj sektion')
-        )
-    );
-    showModal(isEdit ? 'Rediger sektion' : 'Ny sektion', form);
 }
 
 // ─── Tasks Page ───
@@ -4209,171 +3712,6 @@ async function renderSettings(container) {
     }, 'Gem regler');
     decayCard.appendChild(saveDecayBtn);
     container.appendChild(decayCard);
-
-    // ─── Tender Templates Section ───
-    const tmplCard = h('div', { className: 'bg-white rounded-xl shadow-sm border border-gray-200 p-6 mt-6' });
-    tmplCard.appendChild(h('h2', { className: 'text-lg font-semibold text-gray-900 mb-1' }, 'Tilbudsskabeloner'));
-    tmplCard.appendChild(h('p', { className: 'text-sm text-gray-500 mb-4' },
-        'Opret og rediger skabeloner der bruges til at oprette nye tilbud med foruddefinerede sektioner.'));
-
-    const tmplListWrapper = h('div', { className: 'space-y-4' });
-
-    async function loadTemplates() {
-        tmplListWrapper.innerHTML = '<div class="text-sm text-gray-400">Indlæser...</div>';
-        const templates = await api.getTenderTemplates();
-        tmplListWrapper.innerHTML = '';
-
-        if (templates.length === 0) {
-            tmplListWrapper.appendChild(h('div', { className: 'text-sm text-gray-400 italic py-4' },
-                'Ingen skabeloner endnu. Opret en for at komme i gang.'));
-        }
-
-        for (const tmpl of templates) {
-            const detail = await api.getTenderTemplate(tmpl.id);
-            const sections = detail.sections || [];
-            const tmplEl = h('div', { className: 'border border-gray-200 rounded-lg p-4' });
-
-            // Template header with inline editing
-            const nameDisplay = h('div', { className: 'flex items-center justify-between mb-3' });
-            const nameSpan = h('div', { className: 'flex items-center gap-2' },
-                h('span', { className: 'font-semibold text-gray-800' }, tmpl.name),
-                tmpl.is_default ? h('span', { className: 'badge badge-god text-xs' }, 'Standard') : null,
-                h('span', { className: 'text-xs text-gray-400' }, `${tmpl.section_count} sektioner`)
-            );
-            const editTmplBtn = h('button', {
-                className: 'text-blue-600 hover:text-blue-800 text-sm',
-                onClick: () => showTemplateForm(tmpl)
-            }, 'Rediger');
-            const deleteTmplBtn = h('button', {
-                className: 'text-red-400 hover:text-red-600 text-sm ml-2',
-                onClick: async () => {
-                    if (!confirm(`Slet skabelon "${tmpl.name}"?`)) return;
-                    await api.deleteTenderTemplate(tmpl.id);
-                    loadTemplates();
-                }
-            }, 'Slet');
-            nameDisplay.appendChild(nameSpan);
-            nameDisplay.appendChild(h('div', {}, editTmplBtn, deleteTmplBtn));
-            tmplEl.appendChild(nameDisplay);
-
-            if (tmpl.description) {
-                tmplEl.appendChild(h('p', { className: 'text-sm text-gray-500 mb-3' }, tmpl.description));
-            }
-
-            // Sections list
-            const secList = h('div', { className: 'space-y-1' });
-            for (const sec of sections) {
-                const secRow = h('div', { className: 'flex items-center justify-between px-3 py-2 bg-gray-50 rounded-lg text-sm' });
-                secRow.appendChild(h('div', { className: 'flex items-center gap-3' },
-                    h('span', { className: 'text-gray-400 text-xs font-mono w-5' }, `${sec.sort_order + 1}.`),
-                    h('span', { className: 'text-gray-700' }, sec.title),
-                    h('span', { className: 'text-xs text-gray-400' }, `${sec.default_days_before_deadline}d før deadline`)
-                ));
-                secRow.appendChild(h('div', { className: 'flex gap-1' },
-                    h('button', {
-                        className: 'text-gray-400 hover:text-blue-600 text-xs px-1',
-                        onClick: () => showTemplateSectionForm(tmpl.id, sec, () => loadTemplates())
-                    }, 'Rediger'),
-                    h('button', {
-                        className: 'text-gray-400 hover:text-red-600 text-xs px-1',
-                        onClick: async () => {
-                            await api.deleteTemplateSection(sec.id);
-                            loadTemplates();
-                        }
-                    }, 'Slet')
-                ));
-                secList.appendChild(secRow);
-            }
-            tmplEl.appendChild(secList);
-
-            // Add section button
-            tmplEl.appendChild(h('button', {
-                className: 'text-blue-600 hover:text-blue-800 text-sm font-medium mt-2',
-                onClick: () => showTemplateSectionForm(tmpl.id, null, () => loadTemplates())
-            }, '+ Tilføj sektion'));
-
-            tmplListWrapper.appendChild(tmplEl);
-        }
-    }
-
-    // Show template create/edit modal
-    function showTemplateForm(existing = null) {
-        const isEdit = !!existing;
-        const form = h('form', { className: 'space-y-4', onSubmit: async (e) => {
-            e.preventDefault();
-            const fd = new FormData(e.target);
-            const data = { name: fd.get('name'), description: fd.get('description') || null };
-            try {
-                if (isEdit) await api.updateTenderTemplate(existing.id, data);
-                else await api.createTenderTemplate(data);
-                closeModal();
-                loadTemplates();
-            } catch (err) { alert(err.message); }
-        }},
-            formField('Navn *', 'name', existing?.name || '', 'text', true),
-            h('div', {},
-                h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, 'Beskrivelse'),
-                h('textarea', { name: 'description', rows: '2', className: 'w-full border border-gray-300 rounded-lg px-3 py-2' }, existing?.description || '')
-            ),
-            h('div', { className: 'flex justify-end gap-3 pt-2' },
-                h('button', { type: 'button', className: 'px-4 py-2 text-gray-600', onClick: closeModal }, 'Annuller'),
-                h('button', { type: 'submit', className: 'bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 font-medium' },
-                    isEdit ? 'Gem' : 'Opret skabelon')
-            )
-        );
-        showModal(isEdit ? 'Rediger skabelon' : 'Ny skabelon', form);
-    }
-
-    // Show template section create/edit modal
-    function showTemplateSectionForm(templateId, existing = null, onDone) {
-        const isEdit = !!existing;
-        const form = h('form', { className: 'space-y-4', onSubmit: async (e) => {
-            e.preventDefault();
-            const fd = new FormData(e.target);
-            const data = {
-                title: fd.get('title'),
-                description: fd.get('description') || null,
-                default_days_before_deadline: parseInt(fd.get('default_days_before_deadline') || '7'),
-                sort_order: parseInt(fd.get('sort_order') || '0'),
-            };
-            try {
-                if (isEdit) await api.updateTemplateSection(existing.id, data);
-                else await api.addTemplateSection(templateId, data);
-                closeModal();
-                if (onDone) onDone();
-            } catch (err) { alert(err.message); }
-        }},
-            formField('Titel *', 'title', existing?.title || '', 'text', true),
-            h('div', {},
-                h('label', { className: 'block text-sm font-medium text-gray-700 mb-1' }, 'Beskrivelse'),
-                h('textarea', { name: 'description', rows: '2', className: 'w-full border border-gray-300 rounded-lg px-3 py-2' }, existing?.description || '')
-            ),
-            h('div', { className: 'grid grid-cols-2 gap-3' },
-                formField('Dage før deadline', 'default_days_before_deadline', String(existing?.default_days_before_deadline ?? 7), 'number'),
-                formField('Rækkefølge', 'sort_order', String(existing?.sort_order ?? 0), 'number')
-            ),
-            h('div', { className: 'flex justify-end gap-3 pt-2' },
-                h('button', { type: 'button', className: 'px-4 py-2 text-gray-600', onClick: closeModal }, 'Annuller'),
-                h('button', { type: 'submit', className: 'bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 font-medium' },
-                    isEdit ? 'Gem' : 'Tilføj sektion')
-            )
-        );
-        showModal(isEdit ? 'Rediger sektion' : 'Ny sektion', form);
-    }
-
-    // New template button
-    tmplCard.appendChild(h('div', { className: 'flex justify-end mb-4' },
-        h('button', {
-            className: 'bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 text-sm font-medium',
-            onClick: () => showTemplateForm()
-        }, '+ Ny skabelon')
-    ));
-
-    tmplCard.appendChild(tmplListWrapper);
-    container.appendChild(tmplCard);
-
-    // Load templates
-    loadTemplates();
 }
 
 // ════════════════════════════════════════════════════════════════════

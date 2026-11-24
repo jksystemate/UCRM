@@ -194,27 +194,11 @@ export const api = {
     updateTender: (id, data) => request(`/tenders/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
     deleteTender: (id) => request(`/tenders/${id}`, { method: 'DELETE' }),
 
-    // Tender Sections
-    createTenderSection: (data) => request('/tender-sections', { method: 'POST', body: JSON.stringify(data) }),
-    updateTenderSection: (id, data) => request(`/tender-sections/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
-    deleteTenderSection: (id) => request(`/tender-sections/${id}`, { method: 'DELETE' }),
-    getSectionAudit: (sectionId) => request(`/tender-sections/${sectionId}/audit`),
-    addSectionComment: (sectionId, content) => request(`/tender-sections/${sectionId}/comments`,
-        { method: 'POST', body: JSON.stringify({ content }) }),
 
     // Decay rules
     getDecayRules: () => request('/settings/decay-rules'),
     updateDecayRules: (data) => request('/settings/decay-rules', { method: 'PUT', body: JSON.stringify(data) }),
 
-    // Tender Templates
-    getTenderTemplates: () => request('/tender-templates'),
-    getTenderTemplate: (id) => request(`/tender-templates/${id}`),
-    createTenderTemplate: (data) => request('/tender-templates', { method: 'POST', body: JSON.stringify(data) }),
-    updateTenderTemplate: (id, data) => request(`/tender-templates/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
-    deleteTenderTemplate: (id) => request(`/tender-templates/${id}`, { method: 'DELETE' }),
-    addTemplateSection: (templateId, data) => request(`/tender-templates/${templateId}/sections`, { method: 'POST', body: JSON.stringify(data) }),
-    updateTemplateSection: (id, data) => request(`/tender-template-sections/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
-    deleteTemplateSection: (id) => request(`/tender-template-sections/${id}`, { method: 'DELETE' }),
 
     // SystemateCEO: mål, ledermøder og aktioner
     getCeoOverview: () => request('/ceo/overview'),

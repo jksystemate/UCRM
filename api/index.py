@@ -406,26 +406,9 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS idx_company_tags_tag ON company_tags(tag_id)",
             "CREATE INDEX IF NOT EXISTS idx_contact_tags_contact ON contact_tags(contact_id)",
             "CREATE INDEX IF NOT EXISTS idx_contact_tags_tag ON contact_tags(tag_id)",
-            """CREATE TABLE IF NOT EXISTS tender_templates (
-                id SERIAL PRIMARY KEY,
-                name TEXT NOT NULL,
-                description TEXT,
-                is_default BOOLEAN DEFAULT FALSE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )""",
-            """CREATE TABLE IF NOT EXISTS tender_template_sections (
-                id SERIAL PRIMARY KEY,
-                template_id INTEGER NOT NULL REFERENCES tender_templates(id) ON DELETE CASCADE,
-                title TEXT NOT NULL,
-                description TEXT,
-                default_days_before_deadline INTEGER DEFAULT 7,
-                sort_order INTEGER NOT NULL DEFAULT 0
-            )""",
-            "CREATE INDEX IF NOT EXISTS idx_tts_template ON tender_template_sections(template_id)",
             """CREATE TABLE IF NOT EXISTS tenders (
                 id SERIAL PRIMARY KEY,
                 company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
-                template_id INTEGER REFERENCES tender_templates(id) ON DELETE SET NULL,
                 title TEXT NOT NULL,
                 description TEXT,
                 status TEXT NOT NULL DEFAULT 'draft',
@@ -440,36 +423,6 @@ def init_db():
             )""",
             "CREATE INDEX IF NOT EXISTS idx_tenders_company ON tenders(company_id)",
             "CREATE INDEX IF NOT EXISTS idx_tenders_status ON tenders(status)",
-            """CREATE TABLE IF NOT EXISTS tender_sections (
-                id SERIAL PRIMARY KEY,
-                tender_id INTEGER NOT NULL REFERENCES tenders(id) ON DELETE CASCADE,
-                title TEXT NOT NULL,
-                description TEXT,
-                content TEXT,
-                responsible_id INTEGER REFERENCES users(id),
-                reviewer_id INTEGER REFERENCES users(id),
-                status TEXT NOT NULL DEFAULT 'not_started',
-                deadline DATE,
-                start_date DATE,
-                end_date DATE,
-                sort_order INTEGER NOT NULL DEFAULT 0,
-                notes TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )""",
-            "CREATE INDEX IF NOT EXISTS idx_tsections_tender ON tender_sections(tender_id)",
-            """CREATE TABLE IF NOT EXISTS tender_section_audit (
-                id SERIAL PRIMARY KEY,
-                section_id INTEGER NOT NULL REFERENCES tender_sections(id) ON DELETE CASCADE,
-                user_id INTEGER REFERENCES users(id),
-                user_name TEXT,
-                note_type TEXT NOT NULL DEFAULT 'note',
-                content TEXT,
-                old_value TEXT,
-                new_value TEXT,
-                field_name TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )""",
-            "CREATE INDEX IF NOT EXISTS idx_section_audit ON tender_section_audit(section_id)",
             """CREATE TABLE IF NOT EXISTS company_notes (
                 id SERIAL PRIMARY KEY,
                 company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
@@ -530,8 +483,6 @@ def init_db():
             "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS linkedin_connected_systemate BOOLEAN DEFAULT FALSE",
             "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS linkedin_connected_settl BOOLEAN DEFAULT FALSE",
             "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS linkedin_last_checked DATE",
-            "ALTER TABLE tender_sections ADD COLUMN IF NOT EXISTS start_date DATE",
-            "ALTER TABLE tender_sections ADD COLUMN IF NOT EXISTS end_date DATE",
             "ALTER TABLE companies ADD COLUMN IF NOT EXISTS importance TEXT DEFAULT 'middel_vigtig'",
             "ALTER TABLE companies ADD COLUMN IF NOT EXISTS sales_stage TEXT DEFAULT 'tidlig_fase'",
             "ALTER TABLE companies ADD COLUMN IF NOT EXISTS score_cxo INTEGER DEFAULT 0",
@@ -1847,9 +1798,7 @@ class handler(BaseHTTPRequestHandler):
                 active_tenders = [dict(r) for r in db.execute("""
                     SELECT t.id, t.title, t.status, t.deadline, t.estimated_value, t.purchase_route,
                            co.id AS company_id, co.name AS company_name, g.name AS via_group_name,
-                           u.name AS responsible_name,
-                           (SELECT COUNT(*) FROM tender_sections ts WHERE ts.tender_id = t.id) AS total_sections,
-                           (SELECT COUNT(*) FROM tender_sections ts WHERE ts.tender_id = t.id AND ts.status = 'approved') AS approved_sections
+                           u.name AS responsible_name, t.sales_type, t.phase
                     FROM tenders t JOIN companies co ON t.company_id = co.id
                     LEFT JOIN companies g ON t.via_group_id = g.id
                     LEFT JOIN users u ON t.responsible_id = u.id
@@ -1945,16 +1894,7 @@ class handler(BaseHTTPRequestHandler):
                 if "status" in params:
                     q += " AND t.status = %s"; p.append(params["status"][0])
                 q += " ORDER BY t.deadline ASC NULLS LAST, t.created_at DESC"
-                tenders = [dict(r) for r in db.execute(q, p or None).fetchall()]
-                for tender in tenders:
-                    sections = db.execute(
-                        "SELECT status FROM tender_sections WHERE tender_id = %s", (tender["id"],)).fetchall()
-                    total = len(sections)
-                    done = sum(1 for s in sections if s["status"] == "approved")
-                    tender["section_count"] = total
-                    tender["sections_approved"] = done
-                    tender["progress"] = round((done / total * 100) if total > 0 else 0)
-                self._json_response(tenders)
+                self._json_response([dict(r) for r in db.execute(q, p or None).fetchall()])
 
             elif path.startswith("/api/tenders/") and path.endswith("/full"):
                 tid = int(path.split("/")[-2])
@@ -1970,46 +1910,12 @@ class handler(BaseHTTPRequestHandler):
                        WHERE t.id = %s""", (tid,)).fetchone()
                 if not tender:
                     return self._error(404, "Tilbud ikke fundet")
-                sections = [dict(r) for r in db.execute(
-                    """SELECT ts.*, u1.name AS responsible_name, u2.name AS reviewer_name
-                       FROM tender_sections ts
-                       LEFT JOIN users u1 ON ts.responsible_id = u1.id
-                       LEFT JOIN users u2 ON ts.reviewer_id = u2.id
-                       WHERE ts.tender_id = %s ORDER BY ts.sort_order, ts.id""", (tid,)).fetchall()]
                 users = [dict(r) for r in db.execute(
                     "SELECT * FROM users WHERE deleted_at IS NULL ORDER BY name").fetchall()]
                 companies = [dict(r) for r in db.execute(
                     "SELECT id, name FROM companies ORDER BY name").fetchall()]
-                self._json_response({"tender": dict(tender), "sections": sections,
+                self._json_response({"tender": dict(tender),
                                      "users": users, "companies": companies})
-
-            elif path == "/api/tender-phases":
-                self._json_response({"phases": TENDER_PHASES, "closed": TENDER_CLOSED})
-
-            elif path == "/api/tender-templates":
-                templates = [dict(r) for r in db.execute(
-                    "SELECT * FROM tender_templates ORDER BY is_default DESC, name").fetchall()]
-                for t in templates:
-                    t["section_count"] = db.execute(
-                        "SELECT COUNT(*) AS cnt FROM tender_template_sections WHERE template_id = %s",
-                        (t["id"],)).fetchone()["cnt"]
-                self._json_response(templates)
-
-            elif path.startswith("/api/tender-templates/") and path.count("/") == 3:
-                tmpl_id = int(path.split("/")[-1])
-                tmpl = db.execute("SELECT * FROM tender_templates WHERE id = %s", (tmpl_id,)).fetchone()
-                if not tmpl:
-                    return self._error(404, "Skabelon ikke fundet")
-                sections = [dict(r) for r in db.execute(
-                    "SELECT * FROM tender_template_sections WHERE template_id = %s ORDER BY sort_order",
-                    (tmpl_id,)).fetchall()]
-                self._json_response({"template": dict(tmpl), "sections": sections})
-
-            elif path.startswith("/api/tender-sections/") and path.endswith("/audit"):
-                sid = int(path.split("/")[-2])
-                self._json_response([dict(r) for r in db.execute(
-                    "SELECT * FROM tender_section_audit WHERE section_id = %s ORDER BY created_at DESC",
-                    (sid,)).fetchall()])
 
             else:
                 self._error(404, "Endpoint not found")
@@ -2256,10 +2162,10 @@ class handler(BaseHTTPRequestHandler):
 
             elif path == "/api/tenders":
                 cur = db.execute(
-                    """INSERT INTO tenders (company_id,template_id,title,description,status,
+                    """INSERT INTO tenders (company_id,title,description,status,
                        deadline,contact_id,responsible_id,created_by,estimated_value,portal_link,notes,purchase_route,via_group_id)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
-                    (body["company_id"], body.get("template_id"), body["title"], body.get("description"),
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                    (body["company_id"], body["title"], body.get("description"),
                      body.get("status","draft"), body.get("deadline"), body.get("contact_id"),
                      body.get("responsible_id"), uid, body.get("estimated_value"),
                      body.get("portal_link"), body.get("notes"), body.get("purchase_route") or "selv",
@@ -2268,27 +2174,6 @@ class handler(BaseHTTPRequestHandler):
                 if body.get("sales_type") in TENDER_PHASES:
                     first = body.get("phase") or TENDER_PHASES[body["sales_type"]][0][0]
                     self._set_tender_phase(db, tender_id, first, self._user_name(db, uid), "oprettet", body["sales_type"])
-                template_id = body.get("template_id")
-                if template_id:
-                    tmpl_sections = db.execute(
-                        "SELECT * FROM tender_template_sections WHERE template_id = %s ORDER BY sort_order",
-                        (int(template_id),)).fetchall()
-                    prev_end = None
-                    for ts in tmpl_sections:
-                        section_deadline = section_start = section_end = None
-                        if body.get("deadline") and ts["default_days_before_deadline"]:
-                            try:
-                                td = date.fromisoformat(body["deadline"])
-                                section_end = (td - timedelta(days=ts["default_days_before_deadline"])).isoformat()
-                                section_deadline = section_end
-                                section_start = prev_end or date.today().isoformat()
-                                prev_end = section_end
-                            except (ValueError, TypeError):
-                                pass
-                        db.execute(
-                            """INSERT INTO tender_sections (tender_id,title,description,status,deadline,start_date,end_date,sort_order)
-                               VALUES (%s,%s,%s,'not_started',%s,%s,%s,%s)""",
-                            (tender_id, ts["title"], ts["description"], section_deadline, section_start, section_end, ts["sort_order"]))
                 db.commit()
                 log_audit(db, uid, "create", "tender", tender_id, body["title"], {"company_id": body["company_id"]})
                 db.commit()
@@ -2296,74 +2181,6 @@ class handler(BaseHTTPRequestHandler):
                     "SELECT t.*, c.name AS company_name FROM tenders t JOIN companies c ON t.company_id = c.id WHERE t.id = %s",
                     (tender_id,)).fetchone()
                 self._json_response(dict(row), 201)
-
-            elif path.startswith("/api/tender-sections/") and path.endswith("/comments"):
-                sid = int(path.split("/")[-2])
-                user_name = None
-                if uid:
-                    ur = db.execute("SELECT name FROM users WHERE id=%s", (uid,)).fetchone()
-                    if ur: user_name = ur["name"]
-                db.execute(
-                    "INSERT INTO tender_section_audit (section_id,user_id,user_name,note_type,content) VALUES (%s,%s,%s,'comment',%s)",
-                    (sid, uid, user_name, body.get("content","")))
-                db.commit()
-                self._json_response({"ok": True}, 201)
-
-            elif path == "/api/tender-sections":
-                cur = db.execute(
-                    """INSERT INTO tender_sections (tender_id,title,description,content,
-                       responsible_id,reviewer_id,status,deadline,start_date,end_date,sort_order,notes)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
-                    (body["tender_id"], body["title"], body.get("description"), body.get("content"),
-                     body.get("responsible_id"), body.get("reviewer_id"),
-                     body.get("status","not_started"), body.get("deadline"),
-                     body.get("start_date"), body.get("end_date"),
-                     body.get("sort_order",0), body.get("notes")))
-                section_id = cur.fetchone()["id"]
-                db.commit()
-                log_audit(db, uid, "create", "tender_section", section_id, body["title"],
-                          {"tender_id": body["tender_id"]})
-                user_name = None
-                if uid:
-                    ur = db.execute("SELECT name FROM users WHERE id=%s", (uid,)).fetchone()
-                    if ur: user_name = ur["name"]
-                db.execute(
-                    "INSERT INTO tender_section_audit (section_id,user_id,user_name,note_type,content) VALUES (%s,%s,%s,'created','Sektion oprettet')",
-                    (section_id, uid, user_name))
-                db.commit()
-                row = db.execute(
-                    """SELECT ts.*, u1.name AS responsible_name, u2.name AS reviewer_name
-                       FROM tender_sections ts
-                       LEFT JOIN users u1 ON ts.responsible_id = u1.id
-                       LEFT JOIN users u2 ON ts.reviewer_id = u2.id
-                       WHERE ts.id = %s""", (section_id,)).fetchone()
-                self._json_response(dict(row), 201)
-
-            elif path == "/api/tender-templates":
-                cur = db.execute(
-                    "INSERT INTO tender_templates (name,description) VALUES (%s,%s) RETURNING id",
-                    (body["name"], body.get("description")))
-                new_id = cur.fetchone()["id"]
-                db.commit()
-                log_audit(db, uid, "create", "tender_template", new_id, body["name"])
-                db.commit()
-                self._json_response({"id": new_id, "name": body["name"]}, 201)
-
-            elif path.startswith("/api/tender-templates/") and path.endswith("/sections"):
-                tmpl_id = int(path.split("/")[-2])
-                max_sort = db.execute(
-                    "SELECT COALESCE(MAX(sort_order), -1) AS m FROM tender_template_sections WHERE template_id = %s",
-                    (tmpl_id,)).fetchone()["m"]
-                cur = db.execute(
-                    """INSERT INTO tender_template_sections
-                       (template_id,title,description,default_days_before_deadline,sort_order)
-                       VALUES (%s,%s,%s,%s,%s) RETURNING id""",
-                    (tmpl_id, body["title"], body.get("description"),
-                     body.get("default_days_before_deadline",7),
-                     body.get("sort_order", max_sort + 1)))
-                new_id = cur.fetchone()["id"]
-                db.commit()
-                self._json_response({"id": new_id}, 201)
 
             else:
                 self._error(404, "Endpoint not found")
@@ -2672,93 +2489,6 @@ class handler(BaseHTTPRequestHandler):
                     (tid,)).fetchone()
                 self._json_response(dict(row))
 
-            elif path.startswith("/api/tender-sections/") and path.count("/") == 3:
-                sid = int(path.split("/")[-1])
-                existing = db.execute("SELECT * FROM tender_sections WHERE id = %s", (sid,)).fetchone()
-                if not existing:
-                    return self._error(404, "Sektion ikke fundet")
-                old = dict(existing)
-                e = dict(existing)
-                for k, v in body.items():
-                    if k in e:
-                        e[k] = v
-                user_name = None
-                if uid:
-                    ur = db.execute("SELECT name FROM users WHERE id=%s", (uid,)).fetchone()
-                    if ur: user_name = ur["name"]
-                audit_entries = []
-                if e["status"] != old["status"]:
-                    audit_entries.append(("status_change", None, old["status"], e["status"], "status"))
-                if str(e.get("responsible_id") or "") != str(old.get("responsible_id") or ""):
-                    old_n, new_n = "-", "-"
-                    if old.get("responsible_id"):
-                        r = db.execute("SELECT name FROM users WHERE id=%s", (old["responsible_id"],)).fetchone()
-                        if r: old_n = r["name"]
-                    if e.get("responsible_id"):
-                        r = db.execute("SELECT name FROM users WHERE id=%s", (e["responsible_id"],)).fetchone()
-                        if r: new_n = r["name"]
-                    audit_entries.append(("field_change", None, old_n, new_n, "responsible"))
-                if str(e.get("reviewer_id") or "") != str(old.get("reviewer_id") or ""):
-                    old_n, new_n = "-", "-"
-                    if old.get("reviewer_id"):
-                        r = db.execute("SELECT name FROM users WHERE id=%s", (old["reviewer_id"],)).fetchone()
-                        if r: old_n = r["name"]
-                    if e.get("reviewer_id"):
-                        r = db.execute("SELECT name FROM users WHERE id=%s", (e["reviewer_id"],)).fetchone()
-                        if r: new_n = r["name"]
-                    audit_entries.append(("field_change", None, old_n, new_n, "reviewer"))
-                if (e.get("notes") or "") != (old.get("notes") or ""):
-                    audit_entries.append(("note", e.get("notes"), old.get("notes") or "", e.get("notes") or "", "notes"))
-                db.execute(
-                    """UPDATE tender_sections SET title=%s,description=%s,content=%s,
-                       responsible_id=%s,reviewer_id=%s,status=%s,deadline=%s,
-                       start_date=%s,end_date=%s,sort_order=%s,notes=%s WHERE id=%s""",
-                    (e["title"], e.get("description"), e.get("content"),
-                     e.get("responsible_id"), e.get("reviewer_id"), e["status"],
-                     e.get("deadline"), e.get("start_date"), e.get("end_date"),
-                     e["sort_order"], e.get("notes"), sid))
-                for note_type, content, old_val, new_val, field_name in audit_entries:
-                    db.execute(
-                        """INSERT INTO tender_section_audit
-                           (section_id,user_id,user_name,note_type,content,old_value,new_value,field_name)
-                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
-                        (sid, uid, user_name, note_type, content, old_val, new_val, field_name))
-                db.commit()
-                log_audit(db, uid, "update", "tender_section", sid, e["title"], {"status": e["status"]})
-                db.commit()
-                row = db.execute(
-                    """SELECT ts.*, u1.name AS responsible_name, u2.name AS reviewer_name
-                       FROM tender_sections ts
-                       LEFT JOIN users u1 ON ts.responsible_id = u1.id
-                       LEFT JOIN users u2 ON ts.reviewer_id = u2.id
-                       WHERE ts.id = %s""", (sid,)).fetchone()
-                self._json_response(dict(row))
-
-            elif path.startswith("/api/tender-templates/") and path.count("/") == 3:
-                tmpl_id = int(path.split("/")[-1])
-                existing = db.execute("SELECT * FROM tender_templates WHERE id = %s", (tmpl_id,)).fetchone()
-                if not existing:
-                    return self._error(404, "Skabelon ikke fundet")
-                db.execute("UPDATE tender_templates SET name=%s,description=%s WHERE id=%s",
-                           (body.get("name", existing["name"]), body.get("description", existing["description"]), tmpl_id))
-                db.commit()
-                log_audit(db, uid, "update", "tender_template", tmpl_id, body.get("name", existing["name"]))
-                db.commit()
-                self._json_response({"id": tmpl_id, "name": body.get("name", existing["name"])})
-
-            elif path.startswith("/api/tender-template-sections/") and path.count("/") == 3:
-                sec_id = int(path.split("/")[-1])
-                existing = db.execute("SELECT * FROM tender_template_sections WHERE id = %s", (sec_id,)).fetchone()
-                if not existing:
-                    return self._error(404, "Skabelon-sektion ikke fundet")
-                db.execute(
-                    "UPDATE tender_template_sections SET title=%s,description=%s,default_days_before_deadline=%s,sort_order=%s WHERE id=%s",
-                    (body.get("title", existing["title"]), body.get("description", existing["description"]),
-                     body.get("default_days_before_deadline", existing["default_days_before_deadline"]),
-                     body.get("sort_order", existing["sort_order"]), sec_id))
-                db.commit()
-                self._json_response({"id": sec_id})
-
             else:
                 self._error(404, "Endpoint not found")
         finally:
@@ -2870,32 +2600,6 @@ class handler(BaseHTTPRequestHandler):
                 if row:
                     log_audit(db, uid, "delete", "tender", tid, row["title"])
                     db.commit()
-                self._no_content()
-
-            elif path.startswith("/api/tender-sections/") and path.count("/") == 3:
-                sid = int(path.split("/")[-1])
-                row = db.execute("SELECT title FROM tender_sections WHERE id = %s", (sid,)).fetchone()
-                db.execute("DELETE FROM tender_sections WHERE id = %s", (sid,))
-                db.commit()
-                if row:
-                    log_audit(db, uid, "delete", "tender_section", sid, row["title"])
-                    db.commit()
-                self._no_content()
-
-            elif path.startswith("/api/tender-templates/") and path.count("/") == 3:
-                tmpl_id = int(path.split("/")[-1])
-                row = db.execute("SELECT name FROM tender_templates WHERE id = %s", (tmpl_id,)).fetchone()
-                db.execute("DELETE FROM tender_templates WHERE id = %s", (tmpl_id,))
-                db.commit()
-                if row:
-                    log_audit(db, uid, "delete", "tender_template", tmpl_id, row["name"])
-                    db.commit()
-                self._no_content()
-
-            elif path.startswith("/api/tender-template-sections/") and path.count("/") == 3:
-                sec_id = int(path.split("/")[-1])
-                db.execute("DELETE FROM tender_template_sections WHERE id = %s", (sec_id,))
-                db.commit()
                 self._no_content()
 
             else:

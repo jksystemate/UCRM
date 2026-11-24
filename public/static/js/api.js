@@ -163,7 +163,7 @@ export const api = {
     // SystemateCEO: mål, ledermøder og aktioner
     // Login
     getSession: () => request('/session'),
-    login: (password) => request('/login', { method: 'POST', body: JSON.stringify({ password }) }),
+    login: (username, password) => request('/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
     logout: () => request('/logout', { method: 'POST' }),
     getCeoOverview: () => request('/ceo/overview'),
     // Økonomi: budget og saldobalance

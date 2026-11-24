@@ -157,6 +157,8 @@ def _next_due(due, recurrence, today=None):
 # Adgangskoden ligger i miljøvariablen APP_PASSWORD (sat i Vercel). Sessionen er en signeret cookie,
 # så skift af adgangskoden logger alle sessioner ud. Ledernes indrapporteringslinks (/api/r/) og cron er undtaget.
 SESSION_COOKIE = "ucrm_session"
+# Brugernavnet er ikke hemmeligt; det kan ændres med APP_USERNAME i Vercel
+LOGIN_USERNAME = (os.environ.get("APP_USERNAME") or "jk@systemate.dk").strip().lower()
 SESSION_DAYS = 30
 PUBLIC_API = ("/api/login", "/api/logout", "/api/session")
 PUBLIC_API_PREFIXES = ("/api/r/", "/api/cron/")
@@ -1443,9 +1445,11 @@ class handler(BaseHTTPRequestHandler):
             pw = os.environ.get("APP_PASSWORD")
             if not pw:
                 self._error(503, "Login er ikke sat op: APP_PASSWORD mangler i Vercel"); return
-            if not hmac.compare_digest(str(body.get("password") or "").encode(), pw.encode()):
+            user_ok = hmac.compare_digest(str(body.get("username") or "").strip().lower().encode(), LOGIN_USERNAME.encode())
+            pw_ok = hmac.compare_digest(str(body.get("password") or "").encode(), pw.encode())
+            if not (user_ok and pw_ok):
                 time.sleep(1)  # gør gætteri langsomt
-                self._error(401, "Forkert adgangskode"); return
+                self._error(401, "Forkert brugernavn eller adgangskode"); return
             self._send_session({"ok": True}, make_session_token(), SESSION_DAYS * 86400)
         else:
             self._error(404, "Endpoint not found")
